@@ -1,5 +1,7 @@
 # AGENTS.md
 
+Para alterações transversais, leia `../oficina-mecanica-api/.agents/skills/oficina-mecanica/SKILL.md` e as ADRs/RFCs relevantes. Se o clone irmão estiver indisponível, procure os documentos no GitHub e informe a limitação antes de alterar contratos. Não presuma descoberta automática da skill. Preserve os guardrails e padrões específicos deste repositório. Para Terraform, siga o README e prefira `terraform fmt -check -recursive infra/terraform`, `init -backend=false -input=false` e `validate` no ambiente; apply, destroy e alteração de state exigem autorização específica.
+
 ## 1. Papel esperado
 
 Atue como um Engenheiro de Software / Arquiteto de Software Sênior autônomo responsável por executar tarefas ponta a ponta no projeto Oficina Mecânica / Tech Challenge FIAP.
