@@ -74,6 +74,7 @@ jobs:
         uses: actions/checkout@v7
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -99,8 +100,11 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: tfstate-rds-${{ inputs.environment_name }}-
+          key: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
       - name: "🛡️ Preparar configuração exclusiva de destroy"
         if: env.TERRAFORM_ACTION == 'destroy'
         run: node .github/scripts/prepare-destroy.cjs
@@ -144,6 +148,7 @@ jobs:
         uses: actions/checkout@v7
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -160,8 +165,11 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: tfstate-rds-${{ inputs.environment_name }}-
+          key: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
       - name: "🛡️ Preparar configuração exclusiva de destroy"
         if: env.TERRAFORM_ACTION == 'destroy'
         run: node .github/scripts/prepare-destroy.cjs
@@ -192,7 +200,7 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: "🔎 09 · Validar RDS real após apply"
         if: env.TERRAFORM_ACTION == 'apply'
         run: |

@@ -136,7 +136,7 @@ jobs:
           terraform_wrapper: false
 
       - name: "🧪 Validar recuperação segura de destroy"
-        run: node --test .github/scripts/prepare-destroy.test.cjs
+        run: node --test .github/scripts/*.test.cjs
 
       - name: "🎨 03 · Verificar formatação Terraform"
         run: |
