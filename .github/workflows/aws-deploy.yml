@@ -123,7 +123,7 @@ jobs:
       - name: "📐 09 · Gerar prévia do Terraform"
         run: |
           if [ "$TERRAFORM_ACTION" = "destroy" ]; then
-            terraform -chdir="$TF_WORKING_DIRECTORY" plan -destroy -input=false
+            terraform -chdir="$TF_WORKING_DIRECTORY" plan -destroy -input=false -out=tfplan
           else
             terraform -chdir="$TF_WORKING_DIRECTORY" plan -input=false
           fi
