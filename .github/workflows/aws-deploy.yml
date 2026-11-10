@@ -101,6 +101,10 @@ jobs:
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
           key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: tfstate-rds-${{ inputs.environment_name }}-
+      - name: "🛡️ Preparar configuração exclusiva de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs
+
       - name: "🚀 06 · Inicializar Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" init -input=false
       - name: "🔍 07 · Validar configuração Terraform"
@@ -158,6 +162,10 @@ jobs:
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
           key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: tfstate-rds-${{ inputs.environment_name }}-
+      - name: "🛡️ Preparar configuração exclusiva de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs
+
       - name: "🚀 05 · Inicializar Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" init -input=false
       - name: "📐 06 · Gerar plano do Terraform"
@@ -167,8 +175,16 @@ jobs:
           else
             terraform -chdir="$TF_WORKING_DIRECTORY" plan -input=false -out=tfplan
           fi
+      - name: "🛡️ Validar plano exclusivo de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs verify-plan
+
       - name: "✅ 07 · Aplicar plano do Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" apply -input=false -auto-approve tfplan
+      - name: "🔎 Confirmar state sem recursos gerenciados"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs verify-state
+
       - name: "💾 08 · Salvar cache final do state Terraform"
         if: always()
         uses: actions/cache/save@v6
