@@ -116,7 +116,7 @@ jobs:
           set -euo pipefail
           identifier="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.rds_identifier.value // empty')"
           if [ -z "$identifier" ]; then
-            identifier="$(terraform -chdir="$TF_WORKING_DIRECTORY" console -no-color <<< 'var.db_name' | tr -d '"')"
+            identifier="${TF_VAR_db_name:-oficina-mecanica-db-dev}"
           fi
           test -n "$identifier" || { echo "::error::Identificador do RDS não encontrado."; exit 1; }
           echo "db_identifier=$identifier" >> "$GITHUB_OUTPUT"
