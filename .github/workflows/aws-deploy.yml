@@ -74,6 +74,7 @@ jobs:
         uses: actions/checkout@v7
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -99,8 +100,15 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: tfstate-rds-${{ inputs.environment_name }}-
+          key: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
+      - name: "🛡️ Preparar configuração exclusiva de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs
+
       - name: "🚀 06 · Inicializar Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" init -input=false
       - name: "🔍 07 · Validar configuração Terraform"
@@ -112,14 +120,14 @@ jobs:
           set -euo pipefail
           identifier="$(terraform -chdir="$TF_WORKING_DIRECTORY" output -json | jq -r '.rds_identifier.value // empty')"
           if [ -z "$identifier" ]; then
-            identifier="$(terraform -chdir="$TF_WORKING_DIRECTORY" console -no-color <<< 'var.db_name' | tr -d '"')"
+            identifier="${TF_VAR_db_name:-oficina-mecanica-db-dev}"
           fi
           test -n "$identifier" || { echo "::error::Identificador do RDS não encontrado."; exit 1; }
           echo "db_identifier=$identifier" >> "$GITHUB_OUTPUT"
       - name: "📐 09 · Gerar prévia do Terraform"
         run: |
           if [ "$TERRAFORM_ACTION" = "destroy" ]; then
-            terraform -chdir="$TF_WORKING_DIRECTORY" plan -destroy -input=false
+            terraform -chdir="$TF_WORKING_DIRECTORY" plan -destroy -input=false -out=tfplan
           else
             terraform -chdir="$TF_WORKING_DIRECTORY" plan -input=false
           fi
@@ -140,6 +148,7 @@ jobs:
         uses: actions/checkout@v7
       - name: "🔑 02 · Configurar credenciais AWS"
         uses: aws-actions/configure-aws-credentials@v6
+        id: aws_credentials
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -156,8 +165,15 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: tfstate-rds-${{ inputs.environment_name }}-
+          key: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-
+      - name: "🛡️ Validar state da conta AWS atual"
+        run: node .github/scripts/bootstrap-account-state.cjs
+
+      - name: "🛡️ Preparar configuração exclusiva de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs
+
       - name: "🚀 05 · Inicializar Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" init -input=false
       - name: "📐 06 · Gerar plano do Terraform"
@@ -167,8 +183,16 @@ jobs:
           else
             terraform -chdir="$TF_WORKING_DIRECTORY" plan -input=false -out=tfplan
           fi
+      - name: "🛡️ Validar plano exclusivo de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs verify-plan
+
       - name: "✅ 07 · Aplicar plano do Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" apply -input=false -auto-approve tfplan
+      - name: "🔎 Confirmar state sem recursos gerenciados"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs verify-state
+
       - name: "💾 08 · Salvar cache final do state Terraform"
         if: always()
         uses: actions/cache/save@v6
@@ -176,7 +200,7 @@ jobs:
           path: |
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate
             ${{ env.TF_WORKING_DIRECTORY }}/terraform.tfstate.backup
-          key: tfstate-rds-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: tfstate-rds-${{ steps.aws_credentials.outputs.aws-account-id }}-${{ inputs.environment_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: "🔎 09 · Validar RDS real após apply"
         if: env.TERRAFORM_ACTION == 'apply'
         run: |

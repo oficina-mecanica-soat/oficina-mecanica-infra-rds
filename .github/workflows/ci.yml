@@ -135,6 +135,9 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
+      - name: "🧪 Validar recuperação segura de destroy"
+        run: node --test .github/scripts/*.test.cjs
+
       - name: "🎨 03 · Verificar formatação Terraform"
         run: |
           terraform fmt -check -recursive infra/terraform
