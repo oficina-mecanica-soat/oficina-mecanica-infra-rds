@@ -138,6 +138,69 @@ jobs:
       - name: "🧪 Validar recuperação segura de destroy"
         run: node --test .github/scripts/*.test.cjs
 
+      - name: "🛡️ Validar bloqueio e aplicação do plano salvo"
+        run: |
+          node <<'VALIDAR_FLUXO_RDS'
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const cp = require('node:child_process');
+          const assert = require('node:assert/strict');
+          const workflow = fs.readFileSync('.github/workflows/aws-deploy.yml', 'utf8').replaceAll('\r\n', '\n');
+          const planejar = workflow.split('\n  plan:')[1]?.split('\n  apply_or_destroy:')[0];
+          const aplicar = workflow.split('\n  apply_or_destroy:')[1];
+          assert.ok(planejar && aplicar, 'Jobs de plano e aplicação devem existir.');
+          assert.ok(planejar.includes('plan -destroy -input=false -out=tfplan'));
+          assert.ok(planejar.includes('plan -input=false -out=tfplan'));
+          assert.ok(planejar.includes('uses: actions/upload-artifact@v7'));
+          assert.ok(aplicar.includes('uses: actions/download-artifact@v8'));
+          const artefato = trecho => trecho.match(/name: (tfplan-rds-[^\r\n]+)/)?.[1];
+          assert.ok(artefato(planejar));
+          assert.equal(artefato(planejar), artefato(aplicar));
+          assert.ok(artefato(planejar).includes('github.run_attempt'));
+          assert.ok(!/terraform[^\n]*\bplan\s/.test(aplicar), 'Aplicação não pode gerar outro plano.');
+          assert.ok(aplicar.includes('apply -input=false -auto-approve tfplan'));
+          for (const trecho of [planejar, aplicar]) {
+            const restaurar = trecho.indexOf('uses: actions/cache/restore@');
+            const validar = trecho.indexOf('run: node .github/scripts/bootstrap-account-state.cjs');
+            const preparar = trecho.indexOf('run: node .github/scripts/prepare-destroy.cjs');
+            const inicializar = trecho.indexOf('init -input=false');
+            assert.ok(restaurar >= 0 && validar > restaurar && preparar > validar && inicializar > preparar);
+            assert.ok(trecho.includes('tfstate-rds-' + '$' + '{{ steps.aws_credentials.outputs.aws-account-id }}-'));
+            assert.ok(trecho.includes('if: env.TERRAFORM_ACTION == \'destroy\'\n        run: node .github/scripts/prepare-destroy.cjs verify-plan'));
+          }
+          const cd = fs.readFileSync('.github/workflows/cd-development.yml', 'utf8');
+          assert.ok(cd.includes("if: needs.detect-deploy-scope.outputs.deploy_required == 'true' && vars.AWS_DEPLOY_ENABLED == 'true'"));
+          const bloco = workflow.match(/        run: \|\r?\n([\s\S]*?)\r?\n  plan:/);
+          assert.ok(bloco);
+          const codigo = bloco[1].split(/\r?\n/).map(l=>l.slice(10)).join('\n');
+          const prefixo = path.join(os.tmpdir(), 'rds-bloqueio-');
+          const dir = fs.mkdtempSync(prefixo);
+          try {
+            fs.writeFileSync(path.join(dir, 'terraform-action.env'), 'TERRAFORM_ACTION=apply\n');
+            const executar = (habilitado, ref, arquivo) => {
+              const r = cp.spawnSync('bash', ['-c', codigo], { cwd: dir, encoding: 'utf8', env: {
+                ...process.env, DEPLOY_ENABLED: habilitado, GITHUB_REF: ref,
+                TF_WORKING_DIRECTORY: dir.replaceAll('\\', '/'), GITHUB_OUTPUT: path.join(dir, arquivo).replaceAll('\\', '/')
+              } });
+              assert.ifError(r.error);
+              return r;
+            };
+            for (const valor of ['', 'false', 'invalido']) {
+              assert.notEqual(executar(valor, 'refs/heads/develop', 'bloqueado').status, 0);
+              assert.ok(!fs.existsSync(path.join(dir, 'bloqueado')));
+            }
+            assert.notEqual(executar('true', 'refs/heads/main', 'branch-invalida').status, 0);
+            assert.ok(!fs.existsSync(path.join(dir, 'branch-invalida')));
+            assert.equal(executar('true', 'refs/heads/develop', 'permitido').status, 0);
+            assert.equal(fs.readFileSync(path.join(dir, 'permitido'), 'utf8').trim(), 'terraform_action=apply');
+          } finally {
+            assert.ok(path.resolve(dir).startsWith(path.resolve(prefixo)));
+            fs.rmSync(dir, { recursive: true });
+          }
+          console.log('Bloqueio, state restaurado e aplicação do mesmo plano salvo validados.');
+          VALIDAR_FLUXO_RDS
+
       - name: "🎨 03 · Verificar formatação Terraform"
         run: |
           terraform fmt -check -recursive infra/terraform
