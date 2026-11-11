@@ -97,10 +97,22 @@ O destroy restaura o cache Terraform existente e usa uma configuração temporá
 
 Na API, vínculos Kubernetes só podem ser retirados por blocos declarativos removed com destroy=false após ResourceNotFoundException confirmar que o EKS registrado no state não existe. Com EKS existente, permanece a configuração normal de destroy. Não há uso de state rm, import ou mv.
 
-O retorno isolado de terraform-action.env para apply ainda é reconhecido como mudança de infraestrutura pelo detector de CD; não faça esse retorno enquanto não existir separação segura entre rearmar e provisionar. Preserve destroy após a reconciliação e só autorize nova subida em tarefa própria.
+O retorno de terraform-action.env para apply é reconhecido como mudança de infraestrutura pelo detector de CD. O bloqueio AWS_DEPLOY_ENABLED descrito abaixo separa a preparação da execução; somente autorize nova subida em janela própria.
 
 #### State isolado por conta AWS
 
 As chaves de cache incluem o ID da conta retornado pela autenticação AWS, antes do ambiente e da execução. A restauração só pesquisa esse escopo, sem fallback para chaves históricas sem conta. Os caches anteriores permanecem preservados como histórico do laboratório encerrado 058264466885, inclusive quando contêm referências que a conta atual não consegue consultar. AccessDenied não é convertido em ausência.
 
 Sem cache no escopo atual, a esteira bloqueia apply. Um destroy dedicado só pode iniciar state novo depois de consultas read-only confirmarem que não existem recursos ou contratos do projeto na conta atual. Recursos internos do laboratório são preservados. Depois disso, o plano exclusivo de destroy e a validação de state vazio produzem o cache usado pelas próximas execuções da mesma conta. Em laboratório com recursos existentes e cache ausente, é necessário recuperar o state correto; o bootstrap não libera provisionamento automático.
+
+## Preparação da subida e plano único — F4-04
+
+O retorno a `TERRAFORM_ACTION=apply` prepara o RDS após VPC e Kubernetes disponíveis. A variável de repositório `AWS_DEPLOY_ENABLED` foi cadastrada como `false`; CD Development e workflow reutilizável exigem valor `true`, e o reutilizável também exige branch develop. Ausente/false/inválido bloqueia AWS. Não configurar override divergente no Environment. Aprovação/merge do PR não autoriza a janela de execução.
+
+A preparação corrige a divergência de planos registrada no plano de Gabriel como PIPE-002: o job `plan` grava `tfplan` para apply e destroy, confere o plano exclusivo de destroy quando aplicável e publica artefato com ID da execução/tentativa. O job `apply_or_destroy` restaura e valida o state da conta, prepara o ambiente, baixa **o mesmo artefato** e aplica `tfplan`; não gera outro plano. A validação exclusiva de destroy também permanece antes da execução. Retenção de um dia e falha caso o plano não exista seguem as referências VPC/Kubernetes; o identificador da tentativa evita confusão em reexecuções.
+
+Não altera state/cache, regras de recuperação, promoção, environment, contratos SSM ou as verificações reais de RDS/rede. A ordem restore → validação → preparação de destroy → init é mantida nos dois jobs. Os testes novos são inline no CI existente e verificam esse fluxo, os nomes correspondentes de artefato, ausência de replanejamento no job de aplicação e bloqueio real da etapa de resolução em fixture temporária. Nenhuma pasta/arquivo de scripts foi acrescentado.
+
+A futura execução autorizada provisionará a configuração já declarada: RDS SQL Server Express `16.00.4185.3.v1`, `db.t3.micro`, 20 GB criptografados, sem acesso público; DB subnet group nas subnets privadas e security group com entrada TCP/1433 do SG do EKS; senha master gerenciada pelo RDS no Secrets Manager e contratos SSM existentes. Não muda engine, classe, storage ou política de dados, não cria banco lógico de Orçamento/Pagamento, não executa migrations e não implanta aplicações. A separação de credenciais/bancos da F4-07 continua na frente responsável, sem anunciar isolamento já implementado.
+
+Em 11/11/2026, consulta read-only confirmou que a combinação declarada de engine/versão/classe possui opções disponíveis em us-east-1 e que DB_USERNAME está configurado. Isso não comprova permissão de criação, conectividade SQL ou autenticação de consumidores. Terraform fmt/validate, quatro testes de recuperação, teste inline do fluxo e actionlint (sem shellcheck/pyflakes locais) passaram; o CI do PR é a evidência antes do merge. Nenhum plano autenticado, apply/destroy ou banco foi criado nesta preparação. Gabriel realiza o merge e autoriza separadamente a implantação; o bloqueio deve ser restaurado ao final da janela.

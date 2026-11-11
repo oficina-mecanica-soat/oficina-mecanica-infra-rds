@@ -75,7 +75,7 @@ jobs:
   deploy-development:
     name: "☁️ 02 · Deploy em development"
     needs: detect-deploy-scope
-    if: needs.detect-deploy-scope.outputs.deploy_required == 'true'
+    if: needs.detect-deploy-scope.outputs.deploy_required == 'true' && vars.AWS_DEPLOY_ENABLED == 'true'
     uses: ./.github/workflows/aws-deploy.yml
     with:
       environment_name: development
