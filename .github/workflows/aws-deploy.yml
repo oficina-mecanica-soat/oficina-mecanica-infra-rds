@@ -133,6 +133,64 @@ jobs:
           fi
           test -n "$identifier" || { echo "::error::Identificador do RDS não encontrado."; exit 1; }
           echo "db_identifier=$identifier" >> "$GITHUB_OUTPUT"
+      - &kubectl_consumidores
+        name: "☸️ Preparar consulta dos consumidores"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        uses: azure/setup-kubectl@v5
+      - &validar_consumidores
+        name: "🛡️ Bloquear destroy com consumidores API/Lambda"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        env:
+          EXPECTED_ACCOUNT: ${{ steps.aws_credentials.outputs.aws-account-id }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        run: |
+          cat > "$RUNNER_TEMP/verificar-consumidores-rds.cjs" <<'CONSUMIDORES_RDS'
+          const cp = require('node:child_process');
+          const path = require('node:path');
+          function verificar(aws, recursos, conta) {
+            if (!/^\d{12}$/.test(conta || '') || aws('sts','get-caller-identity').Account !== conta)
+              throw Error('Conta AWS divergente; destroy bloqueado.');
+            const funcoes = aws('lambda','list-functions','--query','Functions[].FunctionName');
+            if (!Array.isArray(funcoes) || funcoes.some(n=>typeof n!=='string' || !n))
+              throw Error('Consulta Lambda inválida; destroy bloqueado.');
+            if (funcoes.some(n=>n.startsWith('oficina-mecanica')))
+              throw Error('Lambda do projeto ainda presente; destroy bloqueado.');
+            const clusters = aws('eks','list-clusters','--query','clusters');
+            if (!Array.isArray(clusters) || clusters.some(n=>typeof n!=='string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(n)))
+              throw Error('Consulta EKS inválida; destroy bloqueado.');
+            for (const cluster of clusters) {
+              const lista = recursos(cluster);
+              if (!lista || !Array.isArray(lista.items)) throw Error('Consulta Kubernetes inválida; destroy bloqueado.');
+              // Bloqueia inclusive Deployment escalado a zero: seu retorno poderia reativar acesso ao banco.
+              if (lista.items.length) throw Error('Consumidor API ainda presente; destroy bloqueado.');
+            }
+          }
+          function main() {
+            const regiao = process.env.AWS_REGION;
+            if (!/^[a-z]{2}-[a-z]+-\d$/.test(regiao || '') || !process.env.RUNNER_TEMP) throw Error('Escopo operacional inválido.');
+            const aws = (...args) => {
+              try {
+                const out = cp.execFileSync('aws',[...args,'--region',regiao,'--output','json','--no-cli-pager','--cli-connect-timeout','5','--cli-read-timeout','15'],
+                  {encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:30000});
+                return JSON.parse(out);
+              } catch { throw Error('Consulta AWS não confirmada; destroy bloqueado.'); }
+            };
+            const recursos = cluster => {
+              const config = path.join(process.env.RUNNER_TEMP,`rds-consumidores-${cluster}`);
+              try {
+                cp.execFileSync('aws',['eks','update-kubeconfig','--name',cluster,'--region',regiao,'--kubeconfig',config],
+                  {stdio:['ignore','pipe','pipe'],timeout:30000});
+                return JSON.parse(cp.execFileSync('kubectl',['--request-timeout=15s','--kubeconfig',config,'get','deployments,pods','--all-namespaces',
+                  '--selector','app=oficina-mecanica-api','-o','json'],{encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:30000}));
+              } catch { throw Error('Ausência da API não comprovada no cluster; destroy bloqueado.'); }
+            };
+            verificar(aws,recursos,process.env.EXPECTED_ACCOUNT);
+            console.log('Ausência de consumidores API/Lambda confirmada por consultas reais.');
+          }
+          module.exports={verificar};
+          if(require.main===module) {try{main();}catch(error){console.error(error.message);process.exitCode=1;}}
+          CONSUMIDORES_RDS
+          node "$RUNNER_TEMP/verificar-consumidores-rds.cjs"
       - name: "📐 09 · Gerar plano salvo do Terraform"
         run: |
           if [ "$TERRAFORM_ACTION" = "destroy" ]; then
@@ -204,6 +262,8 @@ jobs:
         if: env.TERRAFORM_ACTION == 'destroy'
         run: node .github/scripts/prepare-destroy.cjs verify-plan
 
+      - *kubectl_consumidores
+      - *validar_consumidores
       - name: "✅ 07 · Aplicar plano do Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" apply -input=false -auto-approve tfplan
       - name: "🔎 Confirmar state sem recursos gerenciados"

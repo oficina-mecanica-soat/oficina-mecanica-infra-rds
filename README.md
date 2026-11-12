@@ -85,6 +85,14 @@ infra-vpc -> infra-kubernetes -> infra-rds -> api
 
 Depois do `apply`, a esteira valida o RDS, o secret gerenciado e os contratos SSM. Depois do `destroy`, valida a ausência do banco e dos parâmetros publicados.
 
+## 🛡️ Consumidores antes do destroy — AUD-002
+
+Antes do plano destrutivo e imediatamente antes de aplicar o mesmo plano salvo, o workflow exige ausência de consumidores API/Lambda, conforme RFC-0005. Consulta a identidade autenticada, os nomes de funções Lambda e os clusters da conta/região. Bloqueia se houver função com o prefixo aprovado `oficina-mecanica`; em cada cluster consulta Deployments/Pods pelo label existente `app=oficina-mecanica-api`, em todos os namespaces. Também bloqueia Deployment escalado a zero, que poderia voltar a acessar o banco. O controle é conservador: Lambda do projeto presente ou cluster inacessível impedem o destroy, mesmo sem prova de uma conexão SQL aberta.
+
+Listagens vazias confirmadas permitem a recuperação de laboratório encerrado; AccessDenied, erro de autenticação/rede, resposta inválida ou ausência não comprovada bloqueiam. Status SSM ausente não é usado como prova de remoção da API. Não altera IAM, credenciais, Terraform/state ou plano salvo, não apaga consumidores e não faz fallback para apply. A guarda só roda em destroy; apply mantém seu fluxo existente.
+
+Código e testes novos ficam inline nos workflows; o arquivo temporário da guarda/kubeconfig fica no runner, sem pasta adicional versionada. Os testes extraem a implementação real e verificam ausência, consumidores presentes, conta divergente, erros de consulta e execução das duas barreiras. Consultas locais de preparação não substituem as revalidações feitas pelo runner no momento do destroy.
+
 ## ⚠️ AWS Academy
 
 O apply do RDS com credencial master gerenciada depende de `secretsmanager:CreateSecret`, `secretsmanager:TagResource` e `kms:DescribeKey`. Essas permissões serão comprovadas somente no apply controlado; se o LabRole as bloquear, a esteira deve falhar sem fazer fallback para senha em Terraform.
