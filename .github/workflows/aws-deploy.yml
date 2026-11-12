@@ -41,7 +41,16 @@ jobs:
         env:
           GITHUB_BEFORE: ${{ github.event.before }}
           GITHUB_AFTER: ${{ github.sha }}
+          DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
         run: |
+          if [ "$DEPLOY_ENABLED" != "true" ]; then
+            echo "::error::AWS_DEPLOY_ENABLED não está habilitado; operação bloqueada."
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/heads/develop" ]; then
+            echo "::error::Operação AWS permitida somente pela branch develop."
+            exit 1
+          fi
           control_file="$TF_WORKING_DIRECTORY/terraform-action.env"
           terraform_action="$(grep -E '^[[:space:]]*TERRAFORM_ACTION[[:space:]]*=' "$control_file" | tail -n 1 | cut -d '=' -f 2- | tr -d '\r' | xargs)"
           case "$terraform_action" in
@@ -124,13 +133,23 @@ jobs:
           fi
           test -n "$identifier" || { echo "::error::Identificador do RDS não encontrado."; exit 1; }
           echo "db_identifier=$identifier" >> "$GITHUB_OUTPUT"
-      - name: "📐 09 · Gerar prévia do Terraform"
+      - name: "📐 09 · Gerar plano salvo do Terraform"
         run: |
           if [ "$TERRAFORM_ACTION" = "destroy" ]; then
             terraform -chdir="$TF_WORKING_DIRECTORY" plan -destroy -input=false -out=tfplan
           else
-            terraform -chdir="$TF_WORKING_DIRECTORY" plan -input=false
+            terraform -chdir="$TF_WORKING_DIRECTORY" plan -input=false -out=tfplan
           fi
+      - name: "🛡️ Validar plano exclusivo de destroy"
+        if: env.TERRAFORM_ACTION == 'destroy'
+        run: node .github/scripts/prepare-destroy.cjs verify-plan
+      - name: "⬆️ 10 · Publicar plano salvo do Terraform"
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfplan-rds-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TF_WORKING_DIRECTORY }}/tfplan
+          retention-days: 1
+          if-no-files-found: error
 
   apply_or_destroy:
     name: "☁️ 03 · Aplicar ou destruir RDS"
@@ -176,13 +195,11 @@ jobs:
 
       - name: "🚀 05 · Inicializar Terraform"
         run: terraform -chdir="$TF_WORKING_DIRECTORY" init -input=false
-      - name: "📐 06 · Gerar plano do Terraform"
-        run: |
-          if [ "$TERRAFORM_ACTION" = "destroy" ]; then
-            terraform -chdir="$TF_WORKING_DIRECTORY" plan -destroy -input=false -out=tfplan
-          else
-            terraform -chdir="$TF_WORKING_DIRECTORY" plan -input=false -out=tfplan
-          fi
+      - name: "⬇️ 06 · Baixar plano salvo desta tentativa"
+        uses: actions/download-artifact@v8
+        with:
+          name: tfplan-rds-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TF_WORKING_DIRECTORY }}
       - name: "🛡️ Validar plano exclusivo de destroy"
         if: env.TERRAFORM_ACTION == 'destroy'
         run: node .github/scripts/prepare-destroy.cjs verify-plan
