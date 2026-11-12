@@ -138,6 +138,43 @@ jobs:
       - name: "🧪 Validar recuperação segura de destroy"
         run: node --test .github/scripts/*.test.cjs
 
+      - name: "🧪 Testar bloqueio de consumidores do RDS"
+        run: |
+          node <<'TESTAR_CONSUMIDORES_RDS'
+          const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict');
+          const workflow=fs.readFileSync('.github/workflows/aws-deploy.yml','utf8');
+          const bloco=workflow.match(/          cat > "\$RUNNER_TEMP\/verificar-consumidores-rds.cjs" <<'CONSUMIDORES_RDS'\r?\n([\s\S]*?)          CONSUMIDORES_RDS/);
+          assert.ok(bloco,'Guarda operacional deve existir no workflow');
+          const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rds-consumidores-'));
+          try {
+            const file=path.join(dir,'guarda.cjs');fs.writeFileSync(file,bloco[1].split(/\r?\n/).map(l=>l.slice(10)).join('\n'));
+            const {verificar}=require(file),conta='123456789012';
+            const executar=({funcoes=[],clusters=[],items=[],erroAws=false,erroKube=false,identidade=conta}={})=>verificar((servico)=>{
+              if(erroAws)throw Error('AccessDenied');
+              return servico==='sts'?{Account:identidade}:servico==='lambda'?funcoes:clusters;
+            },()=>{if(erroKube)throw Error('Forbidden');return {items};},conta);
+            executar();executar({clusters:['oficina-mecanica-eks-dev']});executar({funcoes:['funcao-do-laboratorio']});
+            assert.throws(()=>executar({funcoes:['oficina-mecanica-auth-lambda-dev']}),/Lambda.*presente/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],items:[{kind:'Deployment',spec:{replicas:0}}]}),/API.*presente/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],items:[{kind:'Pod'}]}),/API.*presente/);
+            assert.throws(()=>executar({erroAws:true}),/AccessDenied/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],erroKube:true}),/Forbidden/);
+            assert.throws(()=>executar({identidade:'999999999999'}),/Conta.*divergente/);
+            for(const funcoes of [null,{},['']])assert.throws(()=>executar({funcoes}),/Lambda.*inválida/);
+            for(const clusters of [null,{},['../fora']])assert.throws(()=>executar({clusters}),/EKS.*inválida/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],items:null}),/Kubernetes.*inválida/);
+            const plano=workflow.split('\n  plan:')[1]?.split('\n  apply_or_destroy:')[0];
+            const aplicar=workflow.split('\n  apply_or_destroy:')[1];
+            assert.ok(plano.indexOf('&validar_consumidores')>=0 && plano.indexOf('&validar_consumidores')<plano.indexOf('plan -destroy -input=false -out=tfplan'));
+            assert.ok(aplicar.indexOf('*validar_consumidores')>=0 && aplicar.indexOf('*validar_consumidores')<aplicar.indexOf('apply -input=false -auto-approve tfplan'));
+            assert.ok(/&validar_consumidores\r?\n[\s\S]*?if: env.TERRAFORM_ACTION == 'destroy'/.test(plano));
+            assert.ok(!bloco[1].includes('state rm'));
+            console.log('Consumidores, falhas de acesso, respostas inválidas e duas barreiras de destroy verificados.');
+          } finally {
+            const alvo=path.resolve(dir);assert.ok(alvo.startsWith(path.resolve(os.tmpdir())+path.sep+'rds-consumidores-'));
+            fs.rmSync(alvo,{recursive:true,force:true});
+          }
+          TESTAR_CONSUMIDORES_RDS
       - name: "🛡️ Validar bloqueio e aplicação do plano salvo"
         run: |
           node <<'VALIDAR_FLUXO_RDS'
