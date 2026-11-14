@@ -263,6 +263,12 @@ jobs:
             assert.ok(aplicar.indexOf('*validar_consumidores')>=0 && aplicar.indexOf('*validar_consumidores')<aplicar.indexOf('apply -input=false -auto-approve tfplan'));
             assert.ok(/&validar_consumidores\r?\n[\s\S]*?if: env.TERRAFORM_ACTION == 'destroy'/.test(plano));
             assert.ok(!bloco[1].includes('state rm'));
+            assert.ok(bloco[1].includes('app in (oficina-mecanica-api,oficina-mecanica-orcamento-pagamento,oficina-mecanica-rds-bootstrap)'));
+            assert.ok(workflow.includes('ORCAMENTO_PAGAMENTO_DB_ENABLED'));
+            assert.ok(workflow.includes('BOOTSTRAP_ORCAMENTO_PAGAMENTO'));
+            assert.ok(workflow.indexOf('run: node \"$RUNNER_TEMP/bootstrap-rds-orcamento.cjs\" invalidate') < workflow.indexOf('run: terraform -chdir=\"$TF_WORKING_DIRECTORY\" apply -input=false -auto-approve tfplan'));
+            assert.ok(workflow.includes("if: always() && env.TERRAFORM_ACTION == 'apply' && steps.bootstrap_sql.outcome"));
+            assert.ok(workflow.includes('if: env.TERRAFORM_ACTION == \'apply\'\n        run: |\n          umask 077'));
             console.log('Consumidores, falhas de acesso, respostas inválidas e duas barreiras de destroy verificados.');
           } finally {
             const alvo=path.resolve(dir);assert.ok(alvo.startsWith(path.resolve(os.tmpdir())+path.sep+'rds-consumidores-'));
@@ -332,6 +338,171 @@ jobs:
           console.log('Bloqueio, state restaurado e aplicação do mesmo plano salvo validados.');
           VALIDAR_FLUXO_RDS
 
+      - name: "🧪 Validar bootstrap isolado com SQL Server local"
+        run: |
+          node <<'PREPARAR_TESTES_BOOTSTRAP'
+          const fs = require('node:fs'), path = require('node:path');
+          const origem = fs.readFileSync('.github/workflows/aws-deploy.yml','utf8').replace(/\r\n/g,'\n');
+          const bloco = origem.match(/          cat > "\u0024RUNNER_TEMP\/bootstrap-rds-orcamento.cjs" <<'BOOTSTRAP_ORCAMENTO_PAGAMENTO'\n([\s\S]*?)          BOOTSTRAP_ORCAMENTO_PAGAMENTO/);
+          if(!bloco) throw Error('Bootstrap real ausente no CD.');
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'bootstrap-rds-orcamento.cjs'),bloco[1].split('\n').map(l=>l.slice(10)).join('\n'));
+          PREPARAR_TESTES_BOOTSTRAP
+          cat > "$RUNNER_TEMP/bootstrap-rds-orcamento.test.cjs" <<'TESTAR_BOOTSTRAP_SQL'
+          const { test } = require('node:test');
+          const assert = require('node:assert/strict');
+          const cp = require('node:child_process');
+          const crypto = require('node:crypto');
+          const h = require('./bootstrap-rds-orcamento.cjs');
+
+          test('credencial aleatoria exclusiva preserva o contrato e rejeita master/injecao', () => {
+            const a = h.gerarCredencial(), b = h.gerarCredencial();
+            h.validarCredencial(a);
+            assert.notEqual(a.password,b.password);
+            for (const mudar of [c => c.username='sa',c => c.database='OficinaMecanicaDb',c => c.password="senha'com-injecao",c => c.extra='nao permitido']) {
+              const c={...a};mudar(c);assert.throws(()=>h.validarCredencial(c));
+            }
+          });
+          test('credencial somente nasce sem versões; estágio pendente ou inventário inválido bloqueiam', () => {
+            const token=h.tokenVersaoInicial('arn-proprio');
+            assert(/^[a-f0-9]{64}$/.test(token));
+            assert.equal(token,h.tokenVersaoInicial('arn-proprio'));
+            assert.notEqual(token,h.tokenVersaoInicial('outro-arn'));
+            assert.equal(h.possuiVersaoAtual(undefined),false);
+            assert.equal(h.possuiVersaoAtual({}),false);
+            assert.equal(h.possuiVersaoAtual({versao:['AWSCURRENT']}),true);
+            for(const v of [null,[],{versao:['AWSPENDING']},{versao:'AWSCURRENT'},{versao:[null]}]) assert.throws(()=>h.possuiVersaoAtual(v));
+          });
+          test('metadados vinculam owner, conta, regiao e disponibilidade separada', () => {
+            const m={habilitado:true,database_name:h.database,username:h.username,secret_arn:'arn:aws:secretsmanager:us-east-1:123456789012:secret:oficina-mecanica/development/rds/orcamento-pagamento-Ab123Z',status_parameter:'/oficina-mecanica/development/status/rds-orcamento-pagamento'};
+            h.validarMetadados(m,'123456789012','us-east-1');
+            for (const [k,v] of [['habilitado',false],['database_name','OficinaMecanicaDb'],['username','sa'],['status_parameter','/oficina-mecanica/development/status/rds'],['secret_arn',m.secret_arn.replace('123456789012','999999999999')]]) assert.throws(()=>h.validarMetadados({...m,[k]:v},'123456789012','us-east-1'));
+          });
+          test('Job temporario usa referencias a secret, sem credencial em comando/Pod e sem token de service account', () => {
+            const c=h.gerarCredencial(),admin={username:'master_teste',password:'admin-ficticio-nao-produtivo'};
+            const [secret,job]=h.montarRecursos('rds-orcamento-123-1','rds.test.local',admin,c);
+            assert.equal(secret.kind,'Secret');assert.equal(job.kind,'Job');
+            const spec=job.spec.template.spec, container=spec.containers[0];
+            assert.equal(spec.automountServiceAccountToken,false);
+            assert.equal(container.securityContext.allowPrivilegeEscalation,false);
+            assert.equal(container.securityContext.readOnlyRootFilesystem,true);
+            assert(!JSON.stringify(job).includes(c.password));assert(!JSON.stringify(job).includes(admin.password));
+            assert(container.env.filter(e=>e.valueFrom).every(e=>e.valueFrom.secretKeyRef.name===secret.metadata.name));
+            assert(!container.command.join(' ').includes(' -P '));
+            assert.equal(job.spec.backoffLimit,0);
+            h.validarRemocaoRecurso(job,'rds-orcamento-123-1');
+            assert.throws(()=>h.validarRemocaoRecurso(job,'rds-orcamento-999-1'));
+            assert.throws(()=>h.validarRemocaoRecurso({...job,metadata:{...job.metadata,namespace:'outro'}},'rds-orcamento-123-1'));
+          });
+          test('limpeza confere ownership e remove Job antes do Secret, sem apagar recurso divergente', () => {
+            const id='rds-orcamento-123-1', apagados=[];
+            const recurso={metadata:{name:id,namespace:'default',labels:{app:'oficina-mecanica-rds-bootstrap','oficina-mecanica/bootstrap-run':id}}};
+            const kube=args=>{if(args[0]==='get')return JSON.stringify(recurso);apagados.push(args[1]);return '';};
+            h.limparRecursos(kube,id);
+            assert.deepEqual(apagados,['job','secret']);
+            const alterado={metadata:{...recurso.metadata,namespace:'outro'}};
+            const indevidos=[];
+            assert.throws(()=>h.limparRecursos(args=>{if(args[0]==='get')return JSON.stringify(alterado);indevidos.push(args);return '';},id));
+            assert.equal(indevidos.length,0);
+            assert.throws(()=>h.limparRecursos(()=>{throw Error('Forbidden');},id));
+          });
+          test('disponibilidade anterior exige ownership e fica pendente antes de alterar a instancia', () => {
+            const nome='/oficina-mecanica/development/status/rds-orcamento-pagamento', conta='123456789012', regiao='us-east-1';
+            const p={Name:nome,ARN:'arn:aws:ssm:'+regiao+':'+conta+':parameter'+nome,Type:'String',Value:'ready'};
+            const estado={resources:[{mode:'managed',type:'aws_ssm_parameter',name:'orcamento_pagamento_status',instances:[{attributes:{name:nome,arn:p.ARN}}]}]};
+            const plano=habilitado=>({variables:{orcamento_pagamento_db_enabled:{value:habilitado}}});
+            assert(h.precisaInvalidar(plano(true),{resources:[]}));
+            assert(h.precisaInvalidar(plano(false),estado));
+            assert.equal(h.precisaInvalidar(plano(false),{resources:[]}),false);
+            assert.throws(()=>h.precisaInvalidar({},estado));
+            let escritas=0;
+            h.invalidarDisponibilidade(estado,conta,regiao,()=>p,()=>{escritas++;return {Version:2};});
+            assert.equal(escritas,1);
+            h.invalidarDisponibilidade(estado,conta,regiao,()=>null,()=>{throw Error('Não escrever após ausência.');});
+            assert.throws(()=>h.invalidarDisponibilidade({resources:[]},conta,regiao,()=>p,()=>({Version:2})));
+            assert.throws(()=>h.invalidarDisponibilidade(estado,'999999999999',regiao,()=>p,()=>({Version:2})));
+            assert.throws(()=>h.invalidarDisponibilidade(estado,conta,regiao,()=>({...p,Type:'SecureString'}),()=>({Version:2})));
+            assert.throws(()=>h.invalidarDisponibilidade(estado,conta,regiao,()=>p,()=>({})));
+          });
+          test('modo desabilitado nao consulta AWS, credenciais ou Kubernetes', async () => {
+            const original=cp.execFileSync, chamadas=[];
+            const anteriores={TERRAFORM_ACTION:process.env.TERRAFORM_ACTION,GITHUB_REF:process.env.GITHUB_REF,TF_WORKING_DIRECTORY:process.env.TF_WORKING_DIRECTORY};
+            try {
+              process.env.TERRAFORM_ACTION='apply';process.env.GITHUB_REF='refs/heads/develop';process.env.TF_WORKING_DIRECTORY='nao-utilizado';
+              cp.execFileSync=(bin,args)=>{chamadas.push([bin,...args]);assert.equal(bin,'terraform');return JSON.stringify({orcamento_pagamento_bootstrap:{value:{habilitado:false}}});};
+              await h.main();assert.equal(chamadas.length,1);
+              cp.execFileSync=(bin,args)=>{chamadas.push([bin,...args]);assert.equal(bin,'terraform');return JSON.stringify({variables:{orcamento_pagamento_db_enabled:{value:false}}});};
+              h.invalidarAntesDoApply();assert.equal(chamadas.length,2);
+            } finally {
+              cp.execFileSync=original;
+              for(const [k,v] of Object.entries(anteriores))if(v===undefined)delete process.env[k];else process.env[k]=v;
+            }
+          });
+          test('SQL real com permissoes reduzidas cria banco/login, preserva senha, isola OS e nao adota banco desconhecido', {timeout:240000}, async () => {
+            const nome='oficina-rds-bootstrap-teste-'+crypto.randomBytes(6).toString('hex');
+            const saPassword=crypto.randomBytes(32).toString('hex')+'!Aa9';
+            const runnerPassword=crypto.randomBytes(32).toString('hex')+'!Aa9';
+            const credencial=h.gerarCredencial();
+            const env={...process.env,MSSQL_SA_PASSWORD:saPassword};
+            let cid;
+            const executar=(args,options={})=>cp.execFileSync('docker',args,{encoding:'utf8',stdio:['pipe','pipe','pipe'],...options});
+            const sql=(texto,identidade='rds_master_teste',senha=runnerPassword,banco='master',appPassword=credencial.password)=>{
+              try {
+                return executar(['exec','-i','-e','SQLCMDUSER','-e','SQLCMDPASSWORD','-e','APP_PASSWORD',cid,'/opt/mssql-tools18/bin/sqlcmd','-S','localhost','-d',banco,'-C','-b','-l','5','-t','30'],
+                  {input:texto,env:{...process.env,SQLCMDUSER:identidade,SQLCMDPASSWORD:senha,APP_PASSWORD:appPassword}});
+              } catch(erro) {
+                const textoErro=String(erro.stderr||erro.stdout||'SQL não confirmado.').replaceAll(saPassword,'[teste]').replaceAll(runnerPassword,'[teste]').replaceAll(credencial.password,'[teste]');
+                throw Error(textoErro.slice(0,1200));
+              }
+            };
+            try {
+              cid=executar(['run','--detach','--name',nome,'--label','oficina.owner=rds-bootstrap-test','--env','ACCEPT_EULA=Y','--env','MSSQL_SA_PASSWORD',h.image],{env}).trim();
+              assert(/^[a-f0-9]{64}$/.test(cid));
+              const limite=Date.now()+150000;
+              while(true){
+                try{sql('SELECT 1;','sa',saPassword);break;}catch{if(Date.now()>limite)throw Error('SQL local não ficou disponível.');await new Promise(r=>setTimeout(r,1000));}
+              }
+              sql([
+                'CREATE DATABASE [OficinaMecanicaDb];',
+                "CREATE LOGIN [rds_master_teste] WITH PASSWORD=N'"+runnerPassword+"', CHECK_POLICY=ON;",
+                'GRANT CREATE ANY DATABASE TO [rds_master_teste];',
+                'GRANT ALTER ANY LOGIN TO [rds_master_teste];',
+                'GRANT VIEW ANY DEFINITION TO [rds_master_teste];'
+              ].join('\n'),'sa',saPassword);
+              const executarBootstrap=()=>{
+                sql(h.sqlBootstrap);
+                sql(h.sqlValidarLogin,h.username,credencial.password);
+                sql(h.sqlConfigurarBanco);
+                sql(h.sqlProva,h.username,credencial.password,h.database);
+              };
+              executarBootstrap();
+              executarBootstrap();
+              const scriptJob=h.montarRecursos('rds-orcamento-123-1','localhost',{username:'rds_master_teste',password:runnerPassword},credencial)[1].spec.template.spec.containers[0].command[2];
+              executar(['run','--rm','--label','oficina.owner=rds-bootstrap-test','--read-only','--tmpfs','/tmp:rw,mode=1777','--cap-drop','ALL','--security-opt','no-new-privileges','--user','10001','--network','container:'+cid,
+                ...['SQLCMDUSER','SQLCMDPASSWORD','APP_PASSWORD','DB_HOST','HOME'].flatMap(k=>['--env',k]),'--entrypoint','/bin/bash',h.image,'-c',scriptJob],
+                {env:{...process.env,SQLCMDUSER:'rds_master_teste',SQLCMDPASSWORD:runnerPassword,APP_PASSWORD:credencial.password,DB_HOST:'localhost',HOME:'/tmp'}});
+              assert.throws(()=>sql('SELECT TOP (0) * FROM [OficinaMecanicaDb].sys.tables;',h.username,credencial.password,h.database));
+              assert.throws(()=>sql('CREATE DATABASE [BancoNaoAutorizado];',h.username,credencial.password,h.database));
+              assert.throws(()=>sql("CREATE LOGIN [LoginNaoAutorizado] WITH PASSWORD=N'TesteLocal-Aa9!';",h.username,credencial.password,h.database));
+              assert.throws(()=>sql(h.sqlValidarLogin,h.username,h.gerarCredencial().password));
+              sql(h.sqlProva,h.username,credencial.password,h.database);
+              const prova=sql("SELECT CASE WHEN OBJECT_ID(N'dbo.__oficina_bootstrap_prova') IS NULL THEN 1 ELSE 0 END;",h.username,credencial.password,h.database);
+              assert(prova.includes('1'));
+              sql("USE [OficinaMecanicaOrcamentoPagamento]; EXEC sys.sp_dropextendedproperty @name=N'OficinaServico';");
+              assert.throws(()=>sql(h.sqlBootstrap),/owner/);
+              console.log('SQL local: repetição, isolamento e bloqueios confirmados com login sem sysadmin.');
+            } finally {
+              if(cid){
+                assert(/^[a-f0-9]{64}$/.test(cid));
+                const owner=executar(['inspect','--format','{{index .Config.Labels "oficina.owner"}}',cid]).trim();
+                assert.equal(owner,'rds-bootstrap-test');
+                executar(['rm','--force',cid]);
+              }
+            }
+          });
+
+          TESTAR_BOOTSTRAP_SQL
+          node --test "$RUNNER_TEMP/bootstrap-rds-orcamento.test.cjs"
+
       - name: "🎨 03 · Verificar formatação Terraform"
         run: |
           terraform fmt -check -recursive infra/terraform
@@ -343,6 +514,9 @@ jobs:
       - name: "🔍 05 · Validar configuração Terraform"
         run: |
           terraform -chdir="$TF_WORKING_DIRECTORY" validate
+
+      - name: "🧪 06 · Validar contratos com providers simulados"
+        run: terraform -chdir="$TF_WORKING_DIRECTORY" test
 
   quality_gate:
     name: "🚦 03 · Quality gate"
