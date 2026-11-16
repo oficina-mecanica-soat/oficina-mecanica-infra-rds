@@ -1,6 +1,6 @@
 # 🗄️ Oficina Mecânica Infra RDS
 
-Este repositório provisiona e opera o Amazon RDS SQL Server de `development` da Oficina Mecânica, para a Fase 3 do Tech Challenge FIAP.
+Este repositório provisiona e opera o Amazon RDS SQL Server de `development` da Oficina Mecânica, incluindo o banco e login próprios de Orçamento/Pagamento na evolução para microsserviços.
 
 ## 🎯 Responsabilidades
 
@@ -32,7 +32,7 @@ As branches protegidas são `develop`, `release`, `release/*` e `main`. A govern
 
 ## 🌐 Contrato entre esteiras
 
-Conforme [RFC-0004](https://github.com/geoscabio/oficina-mecanica-api/blob/main/docs/architecture/rfcs/rfc-0004-compartilhamento-de-outputs-entre-esteiras-via-aws-systems-manager-parameter-store.md) e [ADR-0022](https://github.com/geoscabio/oficina-mecanica-api/blob/main/docs/architecture/adrs/adr-0022-uso-do-aws-systems-manager-parameter-store-para-compartilhamento-de-outputs-entre-esteiras.md), esta esteira consome:
+Conforme [RFC-0004](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/main/docs/architecture/rfcs/rfc-0004-compartilhamento-de-outputs-entre-esteiras-via-aws-systems-manager-parameter-store.md) e [ADR-0022](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/main/docs/architecture/adrs/adr-0022-uso-do-aws-systems-manager-parameter-store-para-compartilhamento-de-outputs-entre-esteiras.md), esta esteira consome:
 
 | Parâmetro SSM | Uso |
 | --- | --- |
@@ -77,11 +77,13 @@ terraform -chdir=infra/terraform/environments/dev init -backend=false
 terraform -chdir=infra/terraform/environments/dev validate
 ```
 
-Para gerar plano, configure credenciais AWS e a variável não secreta `TF_VAR_db_username`. O RDS gerencia a senha master no Secrets Manager. A ordem da Fase 3 é:
+Para gerar plano, configure credenciais AWS e a variável não secreta `TF_VAR_db_username`. O RDS gerencia a senha master no Secrets Manager. Este é o terceiro apply, depois de VPC e Kubernetes:
 
 ```text
-infra-vpc -> infra-kubernetes -> infra-rds -> api
+infra-vpc -> infra-kubernetes -> infra-rds -> aplicações -> infra-api-gateway
 ```
+
+Na implantação distribuída, usar `ORCAMENTO_PAGAMENTO_DB_ENABLED=true`: o bootstrap cria banco/login exclusivos pelo Job temporário da esteira e só publica prontidão após prova SQL e limpeza. O RDS compartilhado fisicamente não autoriza acesso cruzado aos bancos. Seguir a [sequência completa](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws); nenhum apply/destroy real deve ser executado localmente.
 
 Depois do `apply`, a esteira valida o RDS, o secret gerenciado e os contratos SSM. Depois do `destroy`, valida a ausência do banco e dos parâmetros publicados.
 
@@ -97,7 +99,7 @@ Código e testes novos ficam inline nos workflows; o arquivo temporário da guar
 
 O apply do RDS com credencial master gerenciada depende de `secretsmanager:CreateSecret`, `secretsmanager:TagResource` e `kms:DescribeKey`. Essas permissões serão comprovadas somente no apply controlado; se o LabRole as bloquear, a esteira deve falhar sem fazer fallback para senha em Terraform.
 
-Documentação central e arquitetura completa: [README da Oficina Mecânica API](https://github.com/geoscabio/oficina-mecanica-api).
+Documentação central e arquitetura completa: [README da Oficina Mecânica API](https://github.com/oficina-mecanica-soat/oficina-mecanica-api).
 
 ### Reconciliação de destroy após reset do laboratório
 
