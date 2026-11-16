@@ -266,7 +266,7 @@ jobs:
 
       - *kubectl_consumidores
       - *validar_consumidores
-      - name: "🛡️ Preparar bootstrap e disponibilidade do banco isolado"
+      - name: "🛡️ Preparar configuração e disponibilidade do banco isolado"
         if: env.TERRAFORM_ACTION == 'apply'
         run: |
           umask 077
@@ -419,7 +419,7 @@ jobs:
             catch (causa) {
               const texto = String(causa.stderr || '');
               const codigos = ['AccessDeniedException','AccessDenied','ExpiredToken','ResourceNotFoundException','InvalidRequestException','InvalidParameterException','ValidationException'];
-              const erro = Error('Operação de bootstrap não confirmada; comando/credenciais/diagnóstico sensível não publicados.');
+              const erro = Error('Operação de preparação SQL não confirmada; comando/credenciais/diagnóstico sensível não publicados.');
               erro.codigoOperacional = codigos.find(codigo => texto.includes('('+codigo+')'))
                 || (/Error parsing parameter|Unable to load paramfile/.test(texto) ? 'ENTRADA_CLI_INVALIDA' : causa.code === 'ETIMEDOUT' ? 'TEMPO_ESGOTADO' : 'COMANDO_NAO_CONFIRMADO');
               throw erro;
@@ -435,9 +435,17 @@ jobs:
           }
           function gravarVersao(secretArn, credencial) {
             validarCredencial(credencial);
-            // O material sensivel segue por stdin, sem arquivo, argumento ou state Terraform.
-            return JSON.parse(executar('aws',['secretsmanager','put-secret-value','--cli-input-json','file:///dev/stdin','--region',process.env.AWS_REGION,'--output','json'],
-              JSON.stringify({ SecretId:secretArn, ClientRequestToken:tokenVersaoInicial(secretArn), SecretString:JSON.stringify(credencial) })));
+            // Somente no diretório temporário restrito do runner, fora do plano/state e dos artefatos.
+            const dir = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP,'credencial-rds-'));
+            const file = path.join(dir,'entrada.json');
+            try {
+              fs.chmodSync(dir,0o700);
+              fs.writeFileSync(file,JSON.stringify({ SecretId:secretArn, ClientRequestToken:tokenVersaoInicial(secretArn), SecretString:JSON.stringify(credencial) }),{encoding:'utf8',mode:0o600,flag:'wx'});
+              return JSON.parse(executar('aws',['secretsmanager','put-secret-value','--cli-input-json','file://'+file,'--region',process.env.AWS_REGION,'--output','json','--no-cli-pager']));
+            } finally {
+              if (fs.existsSync(file)) fs.unlinkSync(file);
+              fs.rmdirSync(dir);
+            }
           }
           function precisaInvalidar(plano, estado) {
             // O JSON do plano preserva como string o valor recebido por TF_VAR.
@@ -494,7 +502,7 @@ jobs:
           }
           BOOTSTRAP_ORCAMENTO_PAGAMENTO
 
-      - name: "🛡️ Preparar execução e diagnóstico do bootstrap"
+      - name: "🛡️ Preparar execução e diagnóstico da configuração SQL"
         if: env.TERRAFORM_ACTION == 'apply'
         run: |
           cat >> "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" <<'EXECUTAR_BOOTSTRAP_ORCAMENTO'
@@ -504,7 +512,7 @@ jobs:
             etapa = 'leitura dos metadados';
             const outputs = JSON.parse(executar('terraform',['-chdir='+process.env.TF_WORKING_DIRECTORY,'output','-json']));
             const m = outputs.orcamento_pagamento_bootstrap?.value;
-            if (m?.habilitado === false) { console.log('Bootstrap de Orçamento/Pagamento desabilitado; nenhuma credencial consultada.'); return; }
+            if (m?.habilitado === false) { console.log('Preparação do banco de Orçamento/Pagamento desabilitado; nenhuma credencial consultada.'); return; }
             etapa = 'validação de conta e RDS';
             const conta = aws('sts','get-caller-identity').Account, regiao = process.env.AWS_REGION;
             if (!/^\d{12}$/.test(conta || '')) throw Error('Identidade AWS inválida.');
@@ -575,16 +583,16 @@ jobs:
             if (aws('ssm','get-parameter','--name',m.status_parameter).Parameter?.Value !== 'ready') throw Error('Status SQL não confirmado.');
             console.log('Banco isolado, credencial própria e limpeza do bootstrap confirmados; não comprova workload ou pagamento.');
           }
-          module.exports = { database,username,image,sqlBootstrap,sqlConfigurarBanco,sqlValidarLogin,sqlProva,gerarCredencial,validarCredencial,validarMetadados,montarRecursos,validarRemocaoRecurso,possuiVersaoAtual,tokenVersaoInicial,limparRecursos,precisaInvalidar,invalidarDisponibilidade,invalidarAntesDoApply,executar,main };
+          module.exports = { database,username,image,sqlBootstrap,sqlConfigurarBanco,sqlValidarLogin,sqlProva,gerarCredencial,validarCredencial,validarMetadados,montarRecursos,validarRemocaoRecurso,possuiVersaoAtual,tokenVersaoInicial,limparRecursos,precisaInvalidar,invalidarDisponibilidade,invalidarAntesDoApply,executar,gravarVersao,main };
           function iniciar() {
             switch (process.argv[2]) {
               case undefined: return main();
               case 'cleanup': return limparAposInterrupcao();
               case 'invalidate': return invalidarAntesDoApply();
-              default: throw Error('Operação de bootstrap inválida.');
+              default: throw Error('Operação de preparação SQL inválida.');
             }
           }
-          if (require.main === module) Promise.resolve().then(iniciar).catch(erro => { console.error('Bootstrap de Orçamento/Pagamento não confirmado na etapa: '+etapa+'. Código: '+(erro.codigoOperacional || 'VALIDACAO_LOCAL')+'. Status não liberado; credenciais e diagnóstico sensível não publicados.'); process.exitCode=1; });
+          if (require.main === module) Promise.resolve().then(iniciar).catch(erro => { console.error('Preparação do banco de Orçamento/Pagamento não confirmado na etapa: '+etapa+'. Código: '+(erro.codigoOperacional || 'VALIDACAO_LOCAL')+'. Status não liberado; credenciais e diagnóstico sensível não publicados.'); process.exitCode=1; });
 
           EXECUTAR_BOOTSTRAP_ORCAMENTO
 
@@ -621,7 +629,7 @@ jobs:
           test "$(aws ssm get-parameter --name "$SSM_RDS_PREFIX/endpoint" --query 'Parameter.Value' --output text)" = "$endpoint"
           test "$(aws ssm get-parameter --name "$SSM_RDS_PREFIX/master_secret_arn" --query 'Parameter.Value' --output text)" = "$master_secret_arn"
           test "$(aws ssm get-parameter --name "$SSM_RDS_STATUS_PARAMETER" --query 'Parameter.Value' --output text)" = "ready"
-      - name: "☸️ Preparar bootstrap privado de Orçamento/Pagamento"
+      - name: "☸️ Preparar acesso privado ao banco de Orçamento/Pagamento"
         if: env.TERRAFORM_ACTION == 'apply'
         uses: azure/setup-kubectl@v5
 
@@ -630,7 +638,7 @@ jobs:
         if: env.TERRAFORM_ACTION == 'apply'
         run: node "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs"
 
-      - name: "🧹 Confirmar limpeza do bootstrap, inclusive após cancelamento"
+      - name: "🧹 Confirmar limpeza da preparação SQL, inclusive após cancelamento"
         if: always() && env.TERRAFORM_ACTION == 'apply' && steps.bootstrap_sql.outcome != 'skipped' && steps.bootstrap_sql.outcome != ''
         run: |
           if [ -f "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" ]; then

@@ -356,6 +356,39 @@ jobs:
           const crypto = require('node:crypto');
           const h = require('./bootstrap-rds-orcamento.cjs');
 
+          test('credencial segue por arquivo temporario restrito e removido inclusive quando a CLI falha', () => {
+            const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+            const original=cp.execFileSync,anterior=process.env.RUNNER_TEMP,regiaoAnterior=process.env.AWS_REGION;
+            const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rds-credencial-teste-'));
+            process.env.RUNNER_TEMP=dir;
+            process.env.AWS_REGION='us-east-1';
+            try {
+              for (const falha of [false,true]) {
+                const credencial=h.gerarCredencial();let arquivo;
+                cp.execFileSync=(bin,args,options)=>{
+                  assert.equal(bin,'aws');assert.equal(options.input,undefined);
+                  assert(!args.some(a=>a.includes(credencial.password)));
+                  const referencia=args[args.indexOf('--cli-input-json')+1];
+                  assert(referencia.startsWith('file://'));arquivo=referencia.slice(7);
+                  assert.equal(path.dirname(path.dirname(arquivo)),dir);
+                  const entrada=JSON.parse(fs.readFileSync(arquivo,'utf8'));
+                  assert.deepEqual(JSON.parse(entrada.SecretString),credencial);
+                  if(process.platform!=='win32') {assert.equal(fs.statSync(arquivo).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(arquivo)).mode&0o777,0o700);}
+                  if(falha) throw Error('falha simulada');
+                  return JSON.stringify({ARN:'arn-proprio',VersionId:'versao'});
+                };
+                if(falha) assert.throws(()=>h.gravarVersao('arn-proprio',credencial));
+                else assert.equal(h.gravarVersao('arn-proprio',credencial).VersionId,'versao');
+                assert(!fs.existsSync(arquivo));assert.equal(fs.readdirSync(dir).length,0);
+              }
+            } finally {
+              cp.execFileSync=original;
+              if(anterior===undefined)delete process.env.RUNNER_TEMP;else process.env.RUNNER_TEMP=anterior;
+              if(regiaoAnterior===undefined)delete process.env.AWS_REGION;else process.env.AWS_REGION=regiaoAnterior;
+              fs.rmdirSync(dir);
+            }
+          });
+
           test('diagnostico operacional publica apenas codigo permitido sem stderr ou credenciais', () => {
             const original=cp.execFileSync;
             try {
