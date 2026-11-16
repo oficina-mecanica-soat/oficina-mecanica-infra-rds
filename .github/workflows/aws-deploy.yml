@@ -433,8 +433,10 @@ jobs:
               JSON.stringify({ SecretId:secretArn, ClientRequestToken:tokenVersaoInicial(secretArn), SecretString:JSON.stringify(credencial) })));
           }
           function precisaInvalidar(plano, estado) {
-            const habilitado = plano.variables?.orcamento_pagamento_db_enabled?.value;
-            if (typeof habilitado !== 'boolean') throw Error('Flag de banco ausente no plano salvo.');
+            // O JSON do plano preserva como string o valor recebido por TF_VAR.
+            const valor = plano.variables?.orcamento_pagamento_db_enabled?.value;
+            if (![true,false,'true','false'].includes(valor)) throw Error('Flag de banco ausente ou inválida no plano salvo.');
+            const habilitado = valor === true || valor === 'true';
             const recursos = estado.resources || [];
             if (!Array.isArray(recursos)) throw Error('State inválido para disponibilidade.');
             return habilitado || recursos.some(r => r.mode === 'managed' && r.type === 'aws_ssm_parameter' && r.name === 'orcamento_pagamento_status' && r.instances?.length);
