@@ -562,6 +562,10 @@ jobs:
               const os=carregarPreparacao('os'),credencialOs=os.gerarCredencial();
               assert.throws(()=>sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password),/Msg 51022, Level 16/);
               sql('USE [OficinaMecanicaDb]; CREATE TABLE dbo.__EFMigrationsHistory (Id int NOT NULL); EXEC(N\'CREATE SCHEMA [GestaoOrdemServico]\'); CREATE TABLE GestaoOrdemServico.OrdensServico (Id int NOT NULL); INSERT INTO GestaoOrdemServico.OrdensServico VALUES (42);');
+              // O RDS atribui o proprietário à conta gerenciada rdsa; o master mantém db_owner.
+              sql("CREATE LOGIN [rdsa] WITH PASSWORD=N'"+credencialOs.password+"'; CREATE LOGIN [owner_desconhecido] WITH PASSWORD=N'"+credencialOs.password+"'; ALTER AUTHORIZATION ON DATABASE::[OficinaMecanicaDb] TO [owner_desconhecido]; USE [OficinaMecanicaDb]; CREATE USER [rds_master_teste] FOR LOGIN [rds_master_teste]; ALTER ROLE [db_owner] ADD MEMBER [rds_master_teste];",'sa',saPassword);
+              assert.throws(()=>sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password),/Msg 51024, Level 16/);
+              sql("ALTER AUTHORIZATION ON DATABASE::[OficinaMecanicaDb] TO [rdsa];",'sa',saPassword);
               const prepararOs=()=>{
                 sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password);
                 sql(os.sqlValidarLogin,os.username,credencialOs.password);

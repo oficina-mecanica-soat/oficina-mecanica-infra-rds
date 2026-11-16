@@ -300,7 +300,7 @@ jobs:
               "      THROW 51022, 'Histórico de migrations não confirmado.', 1;",
               `    IF NOT EXISTS (SELECT 1 FROM [${database}].sys.tables t JOIN [${database}].sys.schemas s ON s.schema_id=t.schema_id WHERE t.name=N'OrdensServico' AND s.name=N'GestaoOrdemServico')`,
               "      THROW 51023, 'Tabela de OS não confirmada.', 1;",
-              `    IF (SELECT owner_sid FROM sys.databases WHERE name=N'${database}') <> SUSER_SID()`,
+              `    IF COALESCE((SELECT SUSER_SNAME(owner_sid) FROM sys.databases WHERE name=N'${database}'),N'') NOT IN (SUSER_SNAME(),N'rdsa')`,
               "      THROW 51024, 'Proprietário do banco não confirmado.', 1;",
               `    EXEC [${database}].sys.sp_addextendedproperty @name=N'OficinaServico', @value=N'${marcador}';`
             ] : ["    THROW 51000, 'Banco preexistente sem marcador do owner; preparação bloqueada.', 1;"]),
