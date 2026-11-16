@@ -363,6 +363,12 @@ jobs:
             finally { require.cache[arquivo]=cache;if(anterior===undefined)delete process.env.RDS_DATABASE_OWNER;else process.env.RDS_DATABASE_OWNER=anterior; }
           }
 
+          test('diagnóstico SQL permite somente fase conhecida e código numérico, sem copiar conteúdo sensível', () => {
+            assert.equal(h.codigoFalhaSql('senha=segredo\nSQL_FALHA_PREPARACAO_51000\ntexto SQL'), 'SQL_FALHA_PREPARACAO_51000');
+            for (const logs of ['senha=segredo','SQL_FALHA_LOGIN_senha','SQL_FALHA_OUTRA_123','SQL_FALHA_LOGIN_123 segredo'])
+              assert.equal(h.codigoFalhaSql(logs), 'SQL_SEM_DIAGNOSTICO_PERMITIDO');
+          });
+
           test('OS recebe identidade propria e owners desconhecidos ou contratos alheios sao rejeitados', () => {
             const os=carregarPreparacao('os');
             assert.equal(os.database,'OficinaMecanicaDb');assert.equal(os.username,'oficina_os');
@@ -554,7 +560,7 @@ jobs:
               const prova=sql("SELECT CASE WHEN OBJECT_ID(N'dbo.__oficina_bootstrap_prova') IS NULL THEN 1 ELSE 0 END;",h.username,credencial.password,h.database);
               assert(prova.includes('1'));
               const os=carregarPreparacao('os'),credencialOs=os.gerarCredencial();
-              assert.throws(()=>sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password),/banco original da OS/);
+              assert.throws(()=>sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password),/Msg 51022, Level 16/);
               sql('USE [OficinaMecanicaDb]; CREATE TABLE dbo.__EFMigrationsHistory (Id int NOT NULL); EXEC(N\'CREATE SCHEMA [GestaoOrdemServico]\'); CREATE TABLE GestaoOrdemServico.OrdensServico (Id int NOT NULL); INSERT INTO GestaoOrdemServico.OrdensServico VALUES (42);');
               const prepararOs=()=>{
                 sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password);

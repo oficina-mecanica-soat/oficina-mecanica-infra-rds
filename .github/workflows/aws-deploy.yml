@@ -296,8 +296,12 @@ jobs:
             ...(owner === 'os' ? [
               `    IF EXISTS (SELECT 1 FROM [${database}].sys.extended_properties WHERE class=0 AND name=N'OficinaServico')`,
               "      THROW 51000, 'Banco marcado por outro owner; preparação bloqueada.', 1;",
-              `    IF NOT EXISTS (SELECT 1 FROM [${database}].sys.tables WHERE name=N'__EFMigrationsHistory') OR NOT EXISTS (SELECT 1 FROM [${database}].sys.tables t JOIN [${database}].sys.schemas s ON s.schema_id=t.schema_id WHERE t.name=N'OrdensServico' AND s.name=N'GestaoOrdemServico') OR (SELECT owner_sid FROM sys.databases WHERE name=N'${database}') <> SUSER_SID()`,
-              "      THROW 51000, 'Banco existente não comprovado como banco original da OS.', 1;",
+              `    IF NOT EXISTS (SELECT 1 FROM [${database}].sys.tables WHERE name=N'__EFMigrationsHistory')`,
+              "      THROW 51022, 'Histórico de migrations não confirmado.', 1;",
+              `    IF NOT EXISTS (SELECT 1 FROM [${database}].sys.tables t JOIN [${database}].sys.schemas s ON s.schema_id=t.schema_id WHERE t.name=N'OrdensServico' AND s.name=N'GestaoOrdemServico')`,
+              "      THROW 51023, 'Tabela de OS não confirmada.', 1;",
+              `    IF (SELECT owner_sid FROM sys.databases WHERE name=N'${database}') <> SUSER_SID()`,
+              "      THROW 51024, 'Proprietário do banco não confirmado.', 1;",
               `    EXEC [${database}].sys.sp_addextendedproperty @name=N'OficinaServico', @value=N'${marcador}';`
             ] : ["    THROW 51000, 'Banco preexistente sem marcador do owner; preparação bloqueada.', 1;"]),
             '  END',
@@ -346,6 +350,9 @@ jobs:
           function gerarCredencial() {
             return { username, database, password: crypto.randomBytes(48).toString('hex') + '!Aa9' };
           }
+          function codigoFalhaSql(logs) {
+            return logs.match(/^SQL_FALHA_(PREPARACAO|LOGIN|PERMISSOES|ISOLAMENTO)_([0-9]{1,6}|INDEFINIDO)$/m)?.[0] || 'SQL_SEM_DIAGNOSTICO_PERMITIDO';
+          }
           function validarCredencial(valor) {
             if (!valor || valor.username !== username || valor.database !== database || !/^[0-9a-f]{96}!Aa9$/.test(valor.password || '') || Object.keys(valor).some(k => !['username','database','password'].includes(k)))
               throw Error('Credencial própria inválida; não substituir por master ou rotacionar silenciosamente.');
@@ -378,10 +385,11 @@ jobs:
               sqlProva,
               'SQL_PROVA',
               'SQLCMD=/opt/mssql-tools18/bin/sqlcmd',
-              'if ! "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 120 -i /tmp/bootstrap.sql >/tmp/diagnostico 2>&1; then echo "Bootstrap SQL não confirmado; diagnóstico sensível não publicado."; exit 1; fi',
-              `if ! SQLCMDUSER=${username} SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 60 -i /tmp/login.sql >/tmp/diagnostico 2>&1; then echo "Credencial existente não comprovada; permissões não concedidas."; exit 1; fi`,
-              'if ! "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 60 -i /tmp/configurar.sql >/tmp/diagnostico 2>&1; then echo "Permissões do banco próprio não confirmadas."; exit 1; fi',
-              `if ! SQLCMDUSER=${username} SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d ${database} -C -N -b -l 15 -t 60 -i /tmp/prova.sql >/tmp/diagnostico 2>&1; then echo "Autenticação ou isolamento SQL não confirmados."; exit 1; fi`,
+              'falhar_sql() { codigo=$(sed -nE "s/^Msg ([0-9]{1,6}),.*/\\1/p" /tmp/diagnostico | head -n 1); printf "SQL_FALHA_%s_%s\\n" "$1" "${codigo:-INDEFINIDO}"; exit 1; }',
+              'if ! "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 120 -i /tmp/bootstrap.sql >/tmp/diagnostico 2>&1; then falhar_sql PREPARACAO; fi',
+              `if ! SQLCMDUSER=${username} SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 60 -i /tmp/login.sql >/tmp/diagnostico 2>&1; then falhar_sql LOGIN; fi`,
+              'if ! "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 60 -i /tmp/configurar.sql >/tmp/diagnostico 2>&1; then falhar_sql PERMISSOES; fi',
+              `if ! SQLCMDUSER=${username} SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d ${database} -C -N -b -l 15 -t 60 -i /tmp/prova.sql >/tmp/diagnostico 2>&1; then falhar_sql ISOLAMENTO; fi`,
               'echo "Banco próprio, autenticação, privilégios e transação de prova confirmados."'
             ].join('\n');
             return [
@@ -580,7 +588,13 @@ jobs:
               const limite = Date.now()+900000;
               while (true) {
                 const job = obter('job');
-                if (job?.status?.conditions?.some(c => c.type === 'Failed' && c.status === 'True')) throw Error('Job SQL falhou; disponibilidade não publicada.');
+                if (job?.status?.conditions?.some(c => c.type === 'Failed' && c.status === 'True')) {
+                  const logs = kubectl(['logs','job/'+id,'--tail=10']);
+                  const codigo = codigoFalhaSql(logs);
+                  const erro = Error('Job SQL falhou; disponibilidade não publicada.');
+                  erro.codigoOperacional = codigo || 'SQL_SEM_DIAGNOSTICO_PERMITIDO';
+                  throw erro;
+                }
                 if (job?.status?.conditions?.some(c => c.type === 'Complete' && c.status === 'True')) break;
                 if (Date.now() >= limite) throw Error('Bootstrap excedeu o prazo; disponibilidade não publicada.');
                 await new Promise(resolve => setTimeout(resolve,3000));
@@ -599,7 +613,7 @@ jobs:
             if (aws('ssm','get-parameter','--name',m.status_parameter).Parameter?.Value !== 'ready') throw Error('Status SQL não confirmado.');
             console.log('Banco isolado, credencial própria e limpeza do bootstrap confirmados; não comprova workload ou pagamento.');
           }
-          module.exports = { database,username,image,sqlBootstrap,sqlConfigurarBanco,sqlValidarLogin,sqlProva,gerarCredencial,validarCredencial,validarMetadados,montarRecursos,validarRemocaoRecurso,possuiVersaoAtual,tokenVersaoInicial,limparRecursos,precisaInvalidar,invalidarDisponibilidade,invalidarAntesDoApply,executar,gravarVersao,main };
+          module.exports = { codigoFalhaSql,database,username,image,sqlBootstrap,sqlConfigurarBanco,sqlValidarLogin,sqlProva,gerarCredencial,validarCredencial,validarMetadados,montarRecursos,validarRemocaoRecurso,possuiVersaoAtual,tokenVersaoInicial,limparRecursos,precisaInvalidar,invalidarDisponibilidade,invalidarAntesDoApply,executar,gravarVersao,main };
           function iniciar() {
             switch (process.argv[2]) {
               case undefined: return main();
