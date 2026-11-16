@@ -10,6 +10,14 @@ variables {
 }
 
 override_resource {
+  target          = aws_secretsmanager_secret.os
+  override_during = plan
+  values = {
+    arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:oficina-mecanica/development/rds/os-Ab123Z"
+  }
+}
+
+override_resource {
   target          = aws_db_instance.this
   override_during = plan
   values = {
@@ -45,6 +53,18 @@ run "banco_isolado_publica_metadados_sem_segredo_e_aguarda_prova_sql" {
   }
   variables {
     orcamento_pagamento_db_enabled = true
+  }
+  assert {
+    condition = (
+      aws_secretsmanager_secret.os.name != aws_secretsmanager_secret.orcamento_pagamento[0].name &&
+      output.os_bootstrap.database_name != output.orcamento_pagamento_bootstrap.database_name &&
+      output.os_bootstrap.username != output.orcamento_pagamento_bootstrap.username &&
+      output.os_bootstrap.username != var.db_username &&
+      aws_ssm_parameter.os_status.value == "bootstrap-pendente" &&
+      aws_ssm_parameter.os_database.name == "/oficina-mecanica/development/rds/os/database_name" &&
+      aws_ssm_parameter.os_secret_arn.value == aws_secretsmanager_secret.os.arn
+    )
+    error_message = "OS e Orçamento devem ter banco, login e secret distintos, aguardando prova SQL própria."
   }
   assert {
     condition = (aws_secretsmanager_secret.orcamento_pagamento[0].name == "oficina-mecanica/development/rds/orcamento-pagamento"
