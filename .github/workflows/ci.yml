@@ -356,6 +356,24 @@ jobs:
           const crypto = require('node:crypto');
           const h = require('./bootstrap-rds-orcamento.cjs');
 
+          function carregarPreparacao(owner) {
+            const arquivo=require.resolve('./bootstrap-rds-orcamento.cjs');
+            const cache=require.cache[arquivo],anterior=process.env.RDS_DATABASE_OWNER;
+            try { process.env.RDS_DATABASE_OWNER=owner;delete require.cache[arquivo];return require(arquivo); }
+            finally { require.cache[arquivo]=cache;if(anterior===undefined)delete process.env.RDS_DATABASE_OWNER;else process.env.RDS_DATABASE_OWNER=anterior; }
+          }
+
+          test('OS recebe identidade propria e owners desconhecidos ou contratos alheios sao rejeitados', () => {
+            const os=carregarPreparacao('os');
+            assert.equal(os.database,'OficinaMecanicaDb');assert.equal(os.username,'oficina_os');
+            assert.notEqual(os.username,h.username);
+            assert.throws(()=>carregarPreparacao('outro'));
+            assert.throws(()=>os.validarCredencial(h.gerarCredencial()));
+            const m={habilitado:true,database_name:os.database,username:os.username,secret_arn:'arn:aws:secretsmanager:us-east-1:123456789012:secret:oficina-mecanica/development/rds/os-Ab123Z',status_parameter:'/oficina-mecanica/development/status/rds-os'};
+            os.validarMetadados(m,'123456789012','us-east-1');
+            assert.throws(()=>h.validarMetadados(m,'123456789012','us-east-1'));
+          });
+
           test('credencial segue por arquivo temporario restrito e removido inclusive quando a CLI falha', () => {
             const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
             const original=cp.execFileSync,anterior=process.env.RUNNER_TEMP,regiaoAnterior=process.env.AWS_REGION;
@@ -510,12 +528,12 @@ jobs:
                 try{sql('SELECT 1;','sa',saPassword);break;}catch{if(Date.now()>limite)throw Error('SQL local não ficou disponível.');await new Promise(r=>setTimeout(r,1000));}
               }
               sql([
-                'CREATE DATABASE [OficinaMecanicaDb];',
                 "CREATE LOGIN [rds_master_teste] WITH PASSWORD=N'"+runnerPassword+"', CHECK_POLICY=ON;",
                 'GRANT CREATE ANY DATABASE TO [rds_master_teste];',
                 'GRANT ALTER ANY LOGIN TO [rds_master_teste];',
                 'GRANT VIEW ANY DEFINITION TO [rds_master_teste];'
               ].join('\n'),'sa',saPassword);
+              sql('CREATE DATABASE [OficinaMecanicaDb];');
               const executarBootstrap=()=>{
                 sql(h.sqlBootstrap);
                 sql(h.sqlValidarLogin,h.username,credencial.password);
@@ -535,6 +553,21 @@ jobs:
               sql(h.sqlProva,h.username,credencial.password,h.database);
               const prova=sql("SELECT CASE WHEN OBJECT_ID(N'dbo.__oficina_bootstrap_prova') IS NULL THEN 1 ELSE 0 END;",h.username,credencial.password,h.database);
               assert(prova.includes('1'));
+              const os=carregarPreparacao('os'),credencialOs=os.gerarCredencial();
+              assert.throws(()=>sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password),/banco original da OS/);
+              sql('USE [OficinaMecanicaDb]; CREATE TABLE dbo.__EFMigrationsHistory (Id int NOT NULL); EXEC(N\'CREATE SCHEMA [GestaoOrdemServico]\'); CREATE TABLE GestaoOrdemServico.OrdensServico (Id int NOT NULL); INSERT INTO GestaoOrdemServico.OrdensServico VALUES (42);');
+              const prepararOs=()=>{
+                sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password);
+                sql(os.sqlValidarLogin,os.username,credencialOs.password);
+                sql(os.sqlConfigurarBanco);
+                sql(os.sqlProva,os.username,credencialOs.password,os.database);
+              };
+              prepararOs();prepararOs();
+              assert(sql('SELECT Id FROM GestaoOrdemServico.OrdensServico;',os.username,credencialOs.password,os.database).includes('42'));
+              assert.throws(()=>sql('SELECT TOP (0) * FROM [OficinaMecanicaOrcamentoPagamento].sys.tables;',os.username,credencialOs.password,os.database));
+              assert.throws(()=>sql('SELECT TOP (0) * FROM [OficinaMecanicaDb].sys.tables;',h.username,credencial.password,h.database));
+              assert.throws(()=>sql('CREATE DATABASE [BancoNaoAutorizadoOs];',os.username,credencialOs.password,os.database));
+              console.log('Dois bancos lógicos, dois logins, dados da OS preservados e acesso cruzado bloqueado nos dois sentidos.');
               sql("USE [OficinaMecanicaOrcamentoPagamento]; EXEC sys.sp_dropextendedproperty @name=N'OficinaServico';");
               assert.throws(()=>sql(h.sqlBootstrap),/owner/);
               console.log('SQL local: repetição, isolamento e bloqueios confirmados com login sem sysadmin.');

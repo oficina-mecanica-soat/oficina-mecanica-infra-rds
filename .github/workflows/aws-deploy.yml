@@ -275,39 +275,54 @@ jobs:
           const path = require('node:path');
           const cp = require('node:child_process');
           const crypto = require('node:crypto');
-          const database = 'OficinaMecanicaOrcamentoPagamento';
-          const username = 'oficina_orcamento_pagamento';
+          const owner = process.env.RDS_DATABASE_OWNER || 'orcamento-pagamento';
+          const contextos = {
+            'orcamento-pagamento': { database:'OficinaMecanicaOrcamentoPagamento', username:'oficina_orcamento_pagamento', outroBanco:'OficinaMecanicaDb', marcador:'oficina-mecanica-orcamento-pagamento', recursoStatus:'orcamento_pagamento_status', output:'orcamento_pagamento_bootstrap', job:'orcamento' },
+            os: { database:'OficinaMecanicaDb', username:'oficina_os', outroBanco:'OficinaMecanicaOrcamentoPagamento', marcador:'oficina-mecanica-api', recursoStatus:'os_status', output:'os_bootstrap', job:'os' }
+          };
+          if (!Object.hasOwn(contextos,owner)) throw Error('Owner SQL não autorizado.');
+          const { database,username,outroBanco,marcador,recursoStatus,output:outputContrato,job:jobOwner } = contextos[owner];
+          const nomeSecret = 'oficina-mecanica/development/rds/'+owner;
+          const nomeStatus = '/oficina-mecanica/development/status/rds-'+owner;
           const image = 'mcr.microsoft.com/mssql/server:2022-latest';
           const sqlBootstrap = [
             'USE [master];',
             'SET NOCOUNT ON;',
             'SET XACT_ABORT ON;',
-            "IF DB_ID(N'OficinaMecanicaOrcamentoPagamento') IS NOT NULL",
+            `IF DB_ID(N'${database}') IS NOT NULL`,
             'BEGIN',
-            "  IF NOT EXISTS (SELECT 1 FROM [OficinaMecanicaOrcamentoPagamento].sys.extended_properties WHERE class=0 AND name=N'OficinaServico' AND CONVERT(nvarchar(128),value)=N'oficina-mecanica-orcamento-pagamento')",
-            "    THROW 51000, 'Banco preexistente sem marcador do owner; bootstrap bloqueado.', 1;",
+            `  IF NOT EXISTS (SELECT 1 FROM [${database}].sys.extended_properties WHERE class=0 AND name=N'OficinaServico' AND CONVERT(nvarchar(128),value)=N'${marcador}')`,
+            '  BEGIN',
+            ...(owner === 'os' ? [
+              `    IF EXISTS (SELECT 1 FROM [${database}].sys.extended_properties WHERE class=0 AND name=N'OficinaServico')`,
+              "      THROW 51000, 'Banco marcado por outro owner; preparação bloqueada.', 1;",
+              `    IF NOT EXISTS (SELECT 1 FROM [${database}].sys.tables WHERE name=N'__EFMigrationsHistory') OR NOT EXISTS (SELECT 1 FROM [${database}].sys.tables t JOIN [${database}].sys.schemas s ON s.schema_id=t.schema_id WHERE t.name=N'OrdensServico' AND s.name=N'GestaoOrdemServico') OR (SELECT owner_sid FROM sys.databases WHERE name=N'${database}') <> SUSER_SID()`,
+              "      THROW 51000, 'Banco existente não comprovado como banco original da OS.', 1;",
+              `    EXEC [${database}].sys.sp_addextendedproperty @name=N'OficinaServico', @value=N'${marcador}';`
+            ] : ["    THROW 51000, 'Banco preexistente sem marcador do owner; preparação bloqueada.', 1;"]),
+            '  END',
             'END',
             'ELSE',
             'BEGIN',
-            "  IF SUSER_ID(N'oficina_orcamento_pagamento') IS NOT NULL THROW 51000, 'Login preexistente sem banco do owner; bootstrap bloqueado.', 1;",
-            "  EXEC(N'CREATE DATABASE [OficinaMecanicaOrcamentoPagamento]');",
-            "  EXEC [OficinaMecanicaOrcamentoPagamento].sys.sp_addextendedproperty @name=N'OficinaServico', @value=N'oficina-mecanica-orcamento-pagamento';",
+            `  IF SUSER_ID(N'${username}') IS NOT NULL THROW 51000, 'Login preexistente sem banco do owner; preparação bloqueada.', 1;`,
+            `  EXEC(N'CREATE DATABASE [${database}]');`,
+            `  EXEC [${database}].sys.sp_addextendedproperty @name=N'OficinaServico', @value=N'${marcador}';`,
             'END;',
-            "IF SUSER_ID(N'oficina_orcamento_pagamento') IS NULL",
-            "  EXEC(N'CREATE LOGIN [oficina_orcamento_pagamento] WITH PASSWORD=N''$(APP_PASSWORD)'', CHECK_POLICY=ON, CHECK_EXPIRATION=OFF');",
+            `IF SUSER_ID(N'${username}') IS NULL`,
+            `  EXEC(N'CREATE LOGIN [${username}] WITH PASSWORD=N''$(APP_PASSWORD)'', CHECK_POLICY=ON, CHECK_EXPIRATION=OFF');`,
             'GO'
           ].join('\n');
           const sqlConfigurarBanco = [
-            'USE [OficinaMecanicaOrcamentoPagamento];',
-            "IF USER_ID(N'oficina_orcamento_pagamento') IS NULL CREATE USER [oficina_orcamento_pagamento] FOR LOGIN [oficina_orcamento_pagamento];",
-            "IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name=N'oficina_orcamento_pagamento' AND sid<>SUSER_SID(N'oficina_orcamento_pagamento'))",
+            `USE [${database}];`,
+            `IF USER_ID(N'${username}') IS NULL CREATE USER [${username}] FOR LOGIN [${username}];`,
+            `IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name=N'${username}' AND sid<>SUSER_SID(N'${username}'))`,
             "  THROW 51000, 'Usuário vinculado a outro login; bootstrap bloqueado.', 1;",
-            "IF IS_ROLEMEMBER(N'db_owner', N'oficina_orcamento_pagamento') <> 1 ALTER ROLE [db_owner] ADD MEMBER [oficina_orcamento_pagamento];",
+            `IF IS_ROLEMEMBER(N'db_owner', N'${username}') <> 1 ALTER ROLE [db_owner] ADD MEMBER [${username}];`,
             'GO'
           ].join('\n');
           const sqlValidarLogin = [
             'SET NOCOUNT ON;',
-            "IF SUSER_SNAME() <> N'oficina_orcamento_pagamento' THROW 51000, 'Identidade SQL divergente.', 1;",
+            `IF SUSER_SNAME() <> N'${username}' THROW 51000, 'Identidade SQL divergente.', 1;`,
             "IF IS_SRVROLEMEMBER(N'sysadmin') <> 0 OR HAS_PERMS_BY_NAME(NULL,N'SERVER',N'ALTER ANY LOGIN') <> 0 OR HAS_PERMS_BY_NAME(NULL,N'SERVER',N'CREATE ANY DATABASE') <> 0",
             "  THROW 51000, 'Credencial da aplicação possui privilégios de servidor.', 1;",
             'GO'
@@ -315,11 +330,11 @@ jobs:
           const sqlProva = [
             'SET NOCOUNT ON;',
             'SET XACT_ABORT ON;',
-            "IF DB_NAME() <> N'OficinaMecanicaOrcamentoPagamento' THROW 51000, 'Banco da aplicação divergente.', 1;",
-            "IF SUSER_SNAME() <> N'oficina_orcamento_pagamento' THROW 51000, 'Identidade SQL divergente.', 1;",
+            `IF DB_NAME() <> N'${database}' THROW 51000, 'Banco da aplicação divergente.', 1;`,
+            `IF SUSER_SNAME() <> N'${username}' THROW 51000, 'Identidade SQL divergente.', 1;`,
             "IF IS_SRVROLEMEMBER(N'sysadmin') <> 0 OR HAS_PERMS_BY_NAME(NULL,N'SERVER',N'ALTER ANY LOGIN') <> 0 OR HAS_PERMS_BY_NAME(NULL,N'SERVER',N'CREATE ANY DATABASE') <> 0",
             "  THROW 51000, 'Credencial da aplicação possui privilégios de servidor.', 1;",
-            "IF HAS_DBACCESS(N'OficinaMecanicaDb')=1 THROW 51000, 'Credencial da aplicação consegue acessar o banco de OS.', 1;",
+            `IF HAS_DBACCESS(N'${outroBanco}')=1 THROW 51000, 'Credencial da aplicação consegue acessar banco de outro serviço.', 1;`,
             'BEGIN TRANSACTION;',
             'CREATE TABLE dbo.__oficina_bootstrap_prova (Id int NOT NULL PRIMARY KEY);',
             'INSERT INTO dbo.__oficina_bootstrap_prova (Id) VALUES (1);',
@@ -337,14 +352,14 @@ jobs:
             return valor;
           }
           function validarMetadados(m, conta, regiao) {
-            const prefixo = 'arn:aws:secretsmanager:' + regiao + ':' + conta + ':secret:oficina-mecanica/development/rds/orcamento-pagamento-';
+            const prefixo = 'arn:aws:secretsmanager:' + regiao + ':' + conta + ':secret:'+nomeSecret+'-';
             if (m?.habilitado !== true || m.database_name !== database || m.username !== username || !m.secret_arn?.startsWith(prefixo)
-              || !/^[A-Za-z0-9]{6}$/.test(m.secret_arn.slice(prefixo.length)) || m.status_parameter !== '/oficina-mecanica/development/status/rds-orcamento-pagamento')
+              || !/^[A-Za-z0-9]{6}$/.test(m.secret_arn.slice(prefixo.length)) || m.status_parameter !== nomeStatus)
               throw Error('Contrato de banco pertence a outro owner, ambiente, conta ou região.');
           }
           function montarRecursos(id, host, admin, credencial) {
             validarCredencial(credencial);
-            if (!/^rds-orcamento-[0-9]+-[0-9]+$/.test(id) || !/^[a-zA-Z0-9.-]+$/.test(host) || !admin?.username || !admin.password) throw Error('Contexto do bootstrap inválido.');
+            if (!/^rds-(orcamento|os)-[0-9]+-[0-9]+$/.test(id) || !/^[a-zA-Z0-9.-]+$/.test(host) || !admin?.username || !admin.password) throw Error('Contexto do bootstrap inválido.');
             const labels = { app: 'oficina-mecanica-rds-bootstrap', 'oficina-mecanica/bootstrap-run': id };
             const script = [
               'set -euo pipefail',
@@ -364,9 +379,9 @@ jobs:
               'SQL_PROVA',
               'SQLCMD=/opt/mssql-tools18/bin/sqlcmd',
               'if ! "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 120 -i /tmp/bootstrap.sql >/tmp/diagnostico 2>&1; then echo "Bootstrap SQL não confirmado; diagnóstico sensível não publicado."; exit 1; fi',
-              'if ! SQLCMDUSER=oficina_orcamento_pagamento SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 60 -i /tmp/login.sql >/tmp/diagnostico 2>&1; then echo "Credencial existente não comprovada; permissões não concedidas."; exit 1; fi',
+              `if ! SQLCMDUSER=${username} SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 60 -i /tmp/login.sql >/tmp/diagnostico 2>&1; then echo "Credencial existente não comprovada; permissões não concedidas."; exit 1; fi`,
               'if ! "$SQLCMD" -S "$DB_HOST,1433" -d master -C -N -b -l 15 -t 60 -i /tmp/configurar.sql >/tmp/diagnostico 2>&1; then echo "Permissões do banco próprio não confirmadas."; exit 1; fi',
-              'if ! SQLCMDUSER=oficina_orcamento_pagamento SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d OficinaMecanicaOrcamentoPagamento -C -N -b -l 15 -t 60 -i /tmp/prova.sql >/tmp/diagnostico 2>&1; then echo "Autenticação ou isolamento SQL não confirmados."; exit 1; fi',
+              `if ! SQLCMDUSER=${username} SQLCMDPASSWORD="$APP_PASSWORD" "$SQLCMD" -S "$DB_HOST,1433" -d ${database} -C -N -b -l 15 -t 60 -i /tmp/prova.sql >/tmp/diagnostico 2>&1; then echo "Autenticação ou isolamento SQL não confirmados."; exit 1; fi`,
               'echo "Banco próprio, autenticação, privilégios e transação de prova confirmados."'
             ].join('\n');
             return [
@@ -402,14 +417,14 @@ jobs:
           }
           function limparAposInterrupcao() {
             etapa = 'limpeza após interrupção';
-            const id = 'rds-orcamento-'+process.env.GITHUB_RUN_ID+'-'+process.env.GITHUB_RUN_ATTEMPT;
-            if (!/^rds-orcamento-[0-9]+-[0-9]+$/.test(id) || !process.env.RUNNER_TEMP) throw Error('Contexto de limpeza inválido.');
+            const id = 'rds-'+jobOwner+'-'+process.env.GITHUB_RUN_ID+'-'+process.env.GITHUB_RUN_ATTEMPT;
+            if (!/^rds-(orcamento|os)-[0-9]+-[0-9]+$/.test(id) || !process.env.RUNNER_TEMP) throw Error('Contexto de limpeza inválido.');
             const config = path.join(process.env.RUNNER_TEMP,id+'.kubeconfig');
             if (!fs.existsSync(config)) { console.log('Nenhum contexto temporário pendente nesta execução.'); return; }
             const outputs = JSON.parse(executar('terraform',['-chdir='+process.env.TF_WORKING_DIRECTORY,'output','-json']));
             const conta = aws('sts','get-caller-identity').Account;
             if (!/^\d{12}$/.test(conta || '')) throw Error('Conta inválida na limpeza.');
-            validarMetadados(outputs.orcamento_pagamento_bootstrap?.value,conta,process.env.AWS_REGION);
+            validarMetadados(outputs[outputContrato]?.value,conta,process.env.AWS_REGION);
             limparRecursos(args=>executar('kubectl',['--kubeconfig',config,'--namespace','default','--request-timeout=30s',...args]),id);
             fs.unlinkSync(config);
             console.log('Limpeza temporária confirmada; não libera disponibilidade SQL.');
@@ -448,18 +463,19 @@ jobs:
             }
           }
           function precisaInvalidar(plano, estado) {
+            if (owner === 'os') return true;
             // O JSON do plano preserva como string o valor recebido por TF_VAR.
             const valor = plano.variables?.orcamento_pagamento_db_enabled?.value;
             if (![true,false,'true','false'].includes(valor)) throw Error('Flag de banco ausente ou inválida no plano salvo.');
             const habilitado = valor === true || valor === 'true';
             const recursos = estado.resources || [];
             if (!Array.isArray(recursos)) throw Error('State inválido para disponibilidade.');
-            return habilitado || recursos.some(r => r.mode === 'managed' && r.type === 'aws_ssm_parameter' && r.name === 'orcamento_pagamento_status' && r.instances?.length);
+            return habilitado || recursos.some(r => r.mode === 'managed' && r.type === 'aws_ssm_parameter' && r.name === recursoStatus && r.instances?.length);
           }
           function invalidarDisponibilidade(estado, conta, regiao, buscar, gravar) {
-            const nome = '/oficina-mecanica/development/status/rds-orcamento-pagamento';
+            const nome = nomeStatus;
             const arn = 'arn:aws:ssm:'+regiao+':'+conta+':parameter'+nome;
-            const registros = (estado.resources || []).filter(r => r.mode === 'managed' && r.type === 'aws_ssm_parameter' && r.name === 'orcamento_pagamento_status').flatMap(r => r.instances || []);
+            const registros = (estado.resources || []).filter(r => r.mode === 'managed' && r.type === 'aws_ssm_parameter' && r.name === recursoStatus).flatMap(r => r.instances || []);
             if (registros.length > 1 || registros.some(i => i.attributes?.name !== nome || i.attributes?.arn !== arn)) throw Error('Disponibilidade do state pertence a outro escopo.');
             const p = buscar();
             if (p === null) return;
@@ -477,7 +493,7 @@ jobs:
             if (!precisaInvalidar(plano,estado)) { console.log('Banco isolado não habilitado; nenhuma consulta adicional AWS.'); return; }
             const conta = aws('sts','get-caller-identity').Account;
             if (!/^\d{12}$/.test(conta || '')) throw Error('Conta inválida para disponibilidade.');
-            const nome = '/oficina-mecanica/development/status/rds-orcamento-pagamento';
+            const nome = nomeStatus;
             const buscar = () => {
               try {
                 const r = JSON.parse(cp.execFileSync('aws',['ssm','get-parameter','--name',nome,'--region',process.env.AWS_REGION,'--output','json'],{encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:30000}));
@@ -511,7 +527,7 @@ jobs:
             if (process.env.TERRAFORM_ACTION !== 'apply' || process.env.GITHUB_REF !== 'refs/heads/develop') throw Error('Bootstrap permitido somente no apply oficial de develop.');
             etapa = 'leitura dos metadados';
             const outputs = JSON.parse(executar('terraform',['-chdir='+process.env.TF_WORKING_DIRECTORY,'output','-json']));
-            const m = outputs.orcamento_pagamento_bootstrap?.value;
+            const m = outputs[outputContrato]?.value;
             if (m?.habilitado === false) { console.log('Preparação do banco de Orçamento/Pagamento desabilitado; nenhuma credencial consultada.'); return; }
             etapa = 'validação de conta e RDS';
             const conta = aws('sts','get-caller-identity').Account, regiao = process.env.AWS_REGION;
@@ -524,7 +540,7 @@ jobs:
             aws('ssm','put-parameter','--name',m.status_parameter,'--type','String','--value','bootstrap-pendente','--overwrite');
             etapa = 'credenciais segregadas';
             const meta = aws('secretsmanager','describe-secret','--secret-id',m.secret_arn);
-            if (meta.ARN !== m.secret_arn || meta.Name !== 'oficina-mecanica/development/rds/orcamento-pagamento'
+            if (meta.ARN !== m.secret_arn || meta.Name !== nomeSecret
               || !meta.Tags?.some(t => t.Key === 'Repository' && t.Value === 'oficina-mecanica-infra-rds')) throw Error('Secret não pertence ao owner RDS.');
             let credencial;
             if (!possuiVersaoAtual(meta.VersionIdsToStages)) {
@@ -547,7 +563,7 @@ jobs:
             if (cluster?.arn !== 'arn:aws:eks:'+regiao+':'+conta+':cluster/'+clusterNome || cluster.status !== 'ACTIVE'
               || cluster.resourcesVpcConfig?.vpcId !== rds[0].DBSubnetGroup?.VpcId) throw Error('Cluster, conta, região ou VPC divergentes.');
             etapa = 'preparo do Job SQL';
-            const id = 'rds-orcamento-'+process.env.GITHUB_RUN_ID+'-'+process.env.GITHUB_RUN_ATTEMPT;
+            const id = 'rds-'+jobOwner+'-'+process.env.GITHUB_RUN_ID+'-'+process.env.GITHUB_RUN_ATTEMPT;
             const recursos = montarRecursos(id,outputs.rds_endpoint.value,admin,credencial);
             const config = path.join(process.env.RUNNER_TEMP,id+'.kubeconfig');
             executar('aws',['eks','update-kubeconfig','--name',clusterNome,'--region',regiao,'--kubeconfig',config]);
@@ -592,12 +608,18 @@ jobs:
               default: throw Error('Operação de preparação SQL inválida.');
             }
           }
-          if (require.main === module) Promise.resolve().then(iniciar).catch(erro => { console.error('Preparação do banco de Orçamento/Pagamento não confirmado na etapa: '+etapa+'. Código: '+(erro.codigoOperacional || 'VALIDACAO_LOCAL')+'. Status não liberado; credenciais e diagnóstico sensível não publicados.'); process.exitCode=1; });
+          if (require.main === module) Promise.resolve().then(iniciar).catch(erro => { console.error('Preparação SQL do serviço '+owner+' não confirmada na etapa: '+etapa+'. Código: '+(erro.codigoOperacional || 'VALIDACAO_LOCAL')+'. Status não liberado; credenciais e diagnóstico sensível não publicados.'); process.exitCode=1; });
 
           EXECUTAR_BOOTSTRAP_ORCAMENTO
 
       - name: "🚦 Invalidar disponibilidade anterior antes do apply"
         if: env.TERRAFORM_ACTION == 'apply'
+        run: node "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" invalidate
+
+      - name: "🚦 Invalidar disponibilidade anterior do banco de OS"
+        if: env.TERRAFORM_ACTION == 'apply'
+        env:
+          RDS_DATABASE_OWNER: os
         run: node "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" invalidate
 
       - name: "✅ 07 · Aplicar plano do Terraform"
@@ -645,6 +667,22 @@ jobs:
             node "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" cleanup
           fi
 
+      - name: "🔐 Preparar banco e credencial exclusivos de OS"
+        id: preparar_sql_os
+        if: env.TERRAFORM_ACTION == 'apply'
+        env:
+          RDS_DATABASE_OWNER: os
+        run: node "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs"
+
+      - name: "🧹 Confirmar limpeza da preparação do banco de OS"
+        if: always() && env.TERRAFORM_ACTION == 'apply' && steps.preparar_sql_os.outcome != 'skipped' && steps.preparar_sql_os.outcome != ''
+        env:
+          RDS_DATABASE_OWNER: os
+        run: |
+          if [ -f "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" ]; then
+            node "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" cleanup
+          fi
+
       - name: "🔎 09 · Validar remoção real após destroy"
         if: env.TERRAFORM_ACTION == 'destroy'
         run: |
@@ -676,7 +714,10 @@ jobs:
           for parameter_name in \
             "$SSM_RDS_PREFIX/orcamento-pagamento/database_name" \
             "$SSM_RDS_PREFIX/orcamento-pagamento/secret_arn" \
-            "/oficina-mecanica/development/status/rds-orcamento-pagamento"; do
+            "/oficina-mecanica/development/status/rds-orcamento-pagamento" \
+            "$SSM_RDS_PREFIX/os/database_name" \
+            "$SSM_RDS_PREFIX/os/secret_arn" \
+            "/oficina-mecanica/development/status/rds-os"; do
             if output="$(aws ssm get-parameter --name "$parameter_name" 2>&1)"; then
               echo "::error::Contrato do banco isolado ainda existe após destroy."
               exit 1
@@ -685,16 +726,18 @@ jobs:
               exit 1
             fi
           done
-          secret_removed=false
-          for attempt in $(seq 1 15); do
-            if output="$(aws secretsmanager describe-secret --secret-id oficina-mecanica/development/rds/orcamento-pagamento 2>&1)"; then
-              sleep 2
-            elif [[ "$output" == *"(ResourceNotFoundException)"* ]]; then
-              secret_removed=true
-              break
-            else
-              echo "::error::Ausência do secret próprio não comprovada."
-              exit 1
-            fi
+          for database_owner in orcamento-pagamento os; do
+            secret_removed=false
+            for attempt in $(seq 1 15); do
+              if output="$(aws secretsmanager describe-secret --secret-id "oficina-mecanica/development/rds/$database_owner" 2>&1)"; then
+                sleep 2
+              elif [[ "$output" == *"(ResourceNotFoundException)"* ]]; then
+                secret_removed=true
+                break
+              else
+                echo "::error::Ausência do secret próprio não comprovada."
+                exit 1
+              fi
+            done
+            test "$secret_removed" = true || { echo "::error::Secret próprio ainda existe após destroy."; exit 1; }
           done
-          test "$secret_removed" = true || { echo "::error::Secret próprio ainda existe após destroy."; exit 1; }

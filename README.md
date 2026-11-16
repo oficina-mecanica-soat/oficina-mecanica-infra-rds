@@ -1,6 +1,6 @@
 # 🗄️ Oficina Mecânica Infra RDS
 
-Este repositório provisiona e opera o Amazon RDS SQL Server de `development` da Oficina Mecânica, incluindo o banco e login próprios de Orçamento/Pagamento na evolução para microsserviços.
+Este repositório provisiona e opera o Amazon RDS SQL Server de `development` da Oficina Mecânica, incluindo bancos lógicos e logins exclusivos de OS e Orçamento/Pagamento.
 
 ## 🎯 Responsabilidades
 
@@ -135,28 +135,33 @@ A guarda exige sucesso da operação atual ou do CD do último commit implantáv
 
 Preserva `AWS_DEPLOY_ENABLED`, `AUTO_PR_ENABLED`, environments, plano salvo, state/cache, guardrails de destroy e merge humano. Não altera ancestralidade (PIPE-005), recursos, contratos SSM ou `terraform-action.env`. PRs existentes continuam sujeitos à revisão humana; a trava protege sua abertura/manutenção pelo CD. Nesta rodada, integrar somente em `develop`, sem promover release/main, sem implantação e com laboratório offline. Testes ficam inline no CI existente, sem novos arquivos ou pastas auxiliares.
 
-## Banco e credencial próprios de Orçamento/Pagamento
+## Bancos e credenciais exclusivos por serviço
 
 A ADR-0025 mantém a instância RDS compartilhada e separa o banco lógico e a credencial da aplicação. `ORCAMENTO_PAGAMENTO_DB_ENABLED` no Environment controla o preparo; ausente equivale a `false`. Essa flag não substitui `AWS_DEPLOY_ENABLED`, a ação explícita do Terraform ou a janela autorizada.
 
-Com a opção habilitada no futuro apply, o Terraform cria somente o contêiner de secret no Secrets Manager e os contratos não secretos. Não recebe a senha por variável, não cria secret version e não grava o material sensível no state. A esteira gera a credencial uma única vez e a persiste no Secrets Manager antes do SQL; repetições reutilizam a versão atual, sem trocar a senha do login. A primeira versão usa um token idempotente por secret: uma resposta perdida não autoriza substituir o valor por outra senha. Inventário de versões inválido ou sem AWSCURRENT bloqueia o processo.
+No apply, a preparação de OS é obrigatória; Orçamento/Pagamento acompanha a opção acima. Para cada serviço, o Terraform cria somente o contêiner de secret no Secrets Manager e os contratos não secretos. Não recebe a senha por variável, não cria secret version e não grava o material sensível no state. A esteira gera a credencial uma única vez e a persiste no Secrets Manager antes do SQL; repetições reutilizam a versão atual, sem trocar a senha do login. A primeira versão usa um token idempotente por secret: uma resposta perdida não autoriza substituir o valor por outra senha. Inventário de versões inválido ou sem AWSCURRENT bloqueia o processo.
 
 O banco `OficinaMecanicaOrcamentoPagamento` e o login `oficina_orcamento_pagamento` são criados por um Job temporário no EKS existente, pela própria esteira RDS. O login recebe db_owner exclusivamente no banco próprio, para permitir as migrations do serviço; não recebe papéis ou permissões de servidor. Schema e migrations continuam pertencendo ao serviço. A preparação SQL autentica o login com a credencial persistida e valida seus privilégios antes de conceder acesso ao banco.
 
-O Job usa a imagem SQL Server 2022 já adotada no Compose da API, executando somente sqlcmd. Roda sem privilégio, sem token de service account e com filesystem somente leitura, usando /tmp temporário. As credenciais master e da aplicação seguem por Secret temporário, sem aparecer no comando ou no manifesto do Pod; não são credenciais de workload da aplicação. O bootstrap não copia credenciais AWS para o Pod. Job e Secret são removidos antes de publicar disponibilidade. Falha de execução ou limpeza mantém o contrato pendente; logs não recebem o diagnóstico SQL sensível. Uma etapa always tenta confirmar a limpeza após falha ou cancelamento, sem garantir remoção durante indisponibilidade do cluster.
+O Job usa a imagem SQL Server 2022 já adotada no Compose da API, executando somente sqlcmd. Roda sem privilégio, sem token de service account e com filesystem somente leitura, usando /tmp temporário. As credenciais master e da aplicação seguem por Secret temporário, sem aparecer no comando ou no manifesto do Pod; não são credenciais de workload da aplicação. A preparação não copia credenciais AWS para o Pod. Job e Secret são removidos antes de publicar disponibilidade. Falha de execução ou limpeza mantém o contrato pendente; logs não recebem o diagnóstico SQL sensível. Uma etapa always tenta confirmar a limpeza após falha ou cancelamento, sem garantir remoção durante indisponibilidade do cluster.
 
 | Contrato SSM | Conteúdo |
 | --- | --- |
+| `/oficina-mecanica/development/rds/os/database_name` | `OficinaMecanicaDb` |
+| `/oficina-mecanica/development/rds/os/secret_arn` | ARN da credencial `oficina_os` |
+| `/oficina-mecanica/development/status/rds-os` | `ready` somente após prova SQL e limpeza |
 | `/oficina-mecanica/development/rds/orcamento-pagamento/database_name` | Nome do banco próprio |
 | `/oficina-mecanica/development/rds/orcamento-pagamento/secret_arn` | ARN não secreto da credencial própria |
 | `/oficina-mecanica/development/status/rds-orcamento-pagamento` | `bootstrap-pendente` até confirmar SQL e limpeza; então `ready` |
 
 O consumidor usa também o endpoint físico já publicado em `/oficina-mecanica/development/rds/endpoint`. O status geral do RDS confirma a instância, e o status de mensageria confirma filas; nenhum dos dois substitui a disponibilidade do banco isolado. Antes do apply, a esteira invalida a disponibilidade anterior comprovadamente pertencente ao state. Erro de acesso não equivale a ausência. O Terraform inicializa o status como pendente; a esteira é dona da transição operacional e o lifecycle preserva esse valor entre execuções.
 
-Banco preexistente sem marcador de ownership não é adotado. Usuário com SID divergente, senha incompatível ou privilégio de servidor bloqueia o bootstrap, sem DROP, mudança automática de senha ou concessão ao login não autenticado. A prova SQL verifica autenticação própria, criação/leitura/escrita com rollback e ausência de acesso ao banco de OS quando existente. Administradores da instância continuam fora dessa barreira; a prova local não substitui o aceite no RDS/AWS Academy.
+Orçamento/Pagamento não adota banco preexistente sem marcador de ownership. Para preservar o banco de OS já criado pela API, sua identificação exige o histórico de migrations, a tabela `GestaoOrdemServico.OrdensServico`, ausência de marcador de outro serviço e ownership do administrador autenticado. Somente depois dessas verificações é registrado o marcador da API, sem recriar o banco ou seus dados. Usuário com SID divergente, senha incompatível ou privilégio de servidor bloqueia a preparação, sem DROP, mudança automática de senha ou concessão ao login não autenticado. A prova SQL verifica autenticação própria, criação/leitura/escrita com rollback e ausência de acesso ao banco de OS quando existente. Administradores da instância continuam fora dessa barreira; a prova local não substitui o aceite no RDS/AWS Academy.
 
 A credencial tem proteção contra remoção por um apply comum, inclusive se a flag desaparecer. O destroy dedicado usa a configuração de recuperação já existente e bloqueia API, Orçamento/Pagamento, Lambda e Pods de bootstrap remanescentes. Depois da destruição, confirma também a ausência dos contratos e do secret próprios. Não há remoção isolada automática de banco ou login.
 
-O CI extrai o mesmo bootstrap do workflow, testa os guardrails e o executa contra SQL Server local com um login sem sysadmin e permissões reduzidas de criação. Também executa o comando do Job em container com as mesmas restrições e planos Terraform com provider simulado. Essas provas não atestam IAM, RBAC, rede ou operação do laboratório.
+O CI extrai a mesma preparação SQL do workflow, testa os guardrails e o executa contra SQL Server local com um login sem sysadmin e permissões reduzidas de criação. Também executa o comando do Job em container com as mesmas restrições e planos Terraform com provider simulado. Essas provas não atestam IAM, RBAC, rede ou operação do laboratório.
 
 Referências: [privilégios da conta master do RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.MasterAccounts.html), [criação de usuário SQL Server no RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.SQLServer.CommonDBATasks.CreateUser.html) e [variáveis de ambiente do sqlcmd](https://learn.microsoft.com/en-us/sql/tools/sqlcmd/sqlcmd-use-scripting-variables?view=sql-server-ver16).
+
+A API utiliza o login `oficina_os` e Orçamento/Pagamento utiliza `oficina_orcamento_pagamento`. Cada login recebe acesso apenas ao próprio banco, sem privilégios de servidor; as provas SQL verificam também o bloqueio de acesso ao banco do outro serviço. A credencial administrativa fica restrita à preparação SQL pela esteira RDS. O compartilhamento físico da instância não implica compartilhamento de credenciais ou tabelas.
