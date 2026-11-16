@@ -411,6 +411,9 @@ jobs:
             const estado={resources:[{mode:'managed',type:'aws_ssm_parameter',name:'orcamento_pagamento_status',instances:[{attributes:{name:nome,arn:p.ARN}}]}]};
             const plano=habilitado=>({variables:{orcamento_pagamento_db_enabled:{value:habilitado}}});
             assert(h.precisaInvalidar(plano(true),{resources:[]}));
+            assert(h.precisaInvalidar(plano('true'),{resources:[]}));
+            assert.equal(h.precisaInvalidar(plano('false'),{resources:[]}),false);
+            for (const valor of [null,undefined,'', 'TRUE','false ',1,0,[],{}]) assert.throws(()=>h.precisaInvalidar(plano(valor),{resources:[]}));
             assert(h.precisaInvalidar(plano(false),estado));
             assert.equal(h.precisaInvalidar(plano(false),{resources:[]}),false);
             assert.throws(()=>h.precisaInvalidar({},estado));
