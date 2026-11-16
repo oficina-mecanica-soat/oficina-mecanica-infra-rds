@@ -354,6 +354,16 @@ jobs:
           const crypto = require('node:crypto');
           const h = require('./bootstrap-rds-orcamento.cjs');
 
+          test('diagnostico operacional publica apenas codigo permitido sem stderr ou credenciais', () => {
+            const original=cp.execFileSync;
+            try {
+              for (const [stderr,codigo] of [['An error occurred (AccessDeniedException): segredo-teste','AccessDeniedException'],['Error parsing parameter: segredo-teste','ENTRADA_CLI_INVALIDA'],['segredo-teste','COMANDO_NAO_CONFIRMADO']]) {
+                cp.execFileSync=()=>{const erro=Error('segredo-teste');erro.stderr=stderr;throw erro;};
+                assert.throws(()=>h.executar('aws',[], 'segredo-teste'),erro=>erro.codigoOperacional===codigo && !JSON.stringify(erro).includes('segredo-teste') && !String(erro).includes('segredo-teste') && erro.cause===undefined);
+              }
+            } finally { cp.execFileSync=original; }
+          });
+
           test('credencial aleatoria exclusiva preserva o contrato e rejeita master/injecao', () => {
             const a = h.gerarCredencial(), b = h.gerarCredencial();
             h.validarCredencial(a);

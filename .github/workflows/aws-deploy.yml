@@ -416,7 +416,14 @@ jobs:
           }
           function executar(binario, args, input) {
             try { return cp.execFileSync(binario,args,{ input, encoding:'utf8',stdio:['pipe','pipe','pipe'],timeout:180000 }); }
-            catch { throw Error('Operação de bootstrap não confirmada; comando/credenciais/diagnóstico sensível não publicados.'); }
+            catch (causa) {
+              const texto = String(causa.stderr || '');
+              const codigos = ['AccessDeniedException','AccessDenied','ExpiredToken','ResourceNotFoundException','InvalidRequestException','InvalidParameterException','ValidationException'];
+              const erro = Error('Operação de bootstrap não confirmada; comando/credenciais/diagnóstico sensível não publicados.');
+              erro.codigoOperacional = codigos.find(codigo => texto.includes('('+codigo+')'))
+                || (/Error parsing parameter|Unable to load paramfile/.test(texto) ? 'ENTRADA_CLI_INVALIDA' : causa.code === 'ETIMEDOUT' ? 'TEMPO_ESGOTADO' : 'COMANDO_NAO_CONFIRMADO');
+              throw erro;
+            }
           }
           function aws(...args) {
             const resultado = JSON.parse(executar('aws',[...args,'--region',process.env.AWS_REGION,'--output','json','--no-cli-pager']));
@@ -508,6 +515,7 @@ jobs:
             let credencial;
             if (!possuiVersaoAtual(meta.VersionIdsToStages)) {
               credencial = gerarCredencial();
+              etapa = 'persistência da credencial exclusiva';
               const gravada = gravarVersao(m.secret_arn,credencial);
               if (gravada.ARN !== m.secret_arn || !gravada.VersionId) throw Error('Persistência da credencial própria não confirmada.');
               const persistida = validarCredencial(JSON.parse(aws('secretsmanager','get-secret-value','--secret-id',m.secret_arn).SecretString));
@@ -515,6 +523,7 @@ jobs:
             } else {
               credencial = validarCredencial(JSON.parse(aws('secretsmanager','get-secret-value','--secret-id',m.secret_arn).SecretString));
             }
+            etapa = 'leitura da credencial administrativa';
             const admin = JSON.parse(aws('secretsmanager','get-secret-value','--secret-id',outputs.rds_master_secret_arn.value).SecretString);
             if (typeof admin?.username !== 'string' || typeof admin.password !== 'string' || !admin.username || !admin.password || admin.username !== rds[0].MasterUsername || admin.username === credencial.username || admin.password === credencial.password) throw Error('Credenciais SQL ausentes ou sem segregação.');
             etapa = 'rede e cluster';
@@ -560,7 +569,7 @@ jobs:
             if (aws('ssm','get-parameter','--name',m.status_parameter).Parameter?.Value !== 'ready') throw Error('Status SQL não confirmado.');
             console.log('Banco isolado, credencial própria e limpeza do bootstrap confirmados; não comprova workload ou pagamento.');
           }
-          module.exports = { database,username,image,sqlBootstrap,sqlConfigurarBanco,sqlValidarLogin,sqlProva,gerarCredencial,validarCredencial,validarMetadados,montarRecursos,validarRemocaoRecurso,possuiVersaoAtual,tokenVersaoInicial,limparRecursos,precisaInvalidar,invalidarDisponibilidade,invalidarAntesDoApply,main };
+          module.exports = { database,username,image,sqlBootstrap,sqlConfigurarBanco,sqlValidarLogin,sqlProva,gerarCredencial,validarCredencial,validarMetadados,montarRecursos,validarRemocaoRecurso,possuiVersaoAtual,tokenVersaoInicial,limparRecursos,precisaInvalidar,invalidarDisponibilidade,invalidarAntesDoApply,executar,main };
           function iniciar() {
             switch (process.argv[2]) {
               case undefined: return main();
@@ -569,7 +578,7 @@ jobs:
               default: throw Error('Operação de bootstrap inválida.');
             }
           }
-          if (require.main === module) Promise.resolve().then(iniciar).catch(() => { console.error('Bootstrap de Orçamento/Pagamento não confirmado na etapa: '+etapa+'. Status não liberado; credenciais e diagnóstico sensível não publicados.'); process.exitCode=1; });
+          if (require.main === module) Promise.resolve().then(iniciar).catch(erro => { console.error('Bootstrap de Orçamento/Pagamento não confirmado na etapa: '+etapa+'. Código: '+(erro.codigoOperacional || 'VALIDACAO_LOCAL')+'. Status não liberado; credenciais e diagnóstico sensível não publicados.'); process.exitCode=1; });
 
           BOOTSTRAP_ORCAMENTO_PAGAMENTO
 
