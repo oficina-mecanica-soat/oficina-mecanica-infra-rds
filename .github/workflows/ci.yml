@@ -345,7 +345,9 @@ jobs:
           const origem = fs.readFileSync('.github/workflows/aws-deploy.yml','utf8').replace(/\r\n/g,'\n');
           const bloco = origem.match(/          cat > "\u0024RUNNER_TEMP\/bootstrap-rds-orcamento.cjs" <<'BOOTSTRAP_ORCAMENTO_PAGAMENTO'\n([\s\S]*?)          BOOTSTRAP_ORCAMENTO_PAGAMENTO/);
           if(!bloco) throw Error('Bootstrap real ausente no CD.');
-          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'bootstrap-rds-orcamento.cjs'),bloco[1].split('\n').map(l=>l.slice(10)).join('\n'));
+          const execucao = origem.match(/          cat >> "\u0024RUNNER_TEMP\/bootstrap-rds-orcamento.cjs" <<'EXECUTAR_BOOTSTRAP_ORCAMENTO'\n([\s\S]*?)          EXECUTAR_BOOTSTRAP_ORCAMENTO/);
+          if(!execucao) throw Error('Execução real do bootstrap ausente no CD.');
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'bootstrap-rds-orcamento.cjs'),[bloco[1],execucao[1]].map(parte=>parte.split('\n').map(l=>l.slice(10)).join('\n')).join('\n'));
           PREPARAR_TESTES_BOOTSTRAP
           cat > "$RUNNER_TEMP/bootstrap-rds-orcamento.test.cjs" <<'TESTAR_BOOTSTRAP_SQL'
           const { test } = require('node:test');
@@ -353,6 +355,16 @@ jobs:
           const cp = require('node:child_process');
           const crypto = require('node:crypto');
           const h = require('./bootstrap-rds-orcamento.cjs');
+
+          test('diagnostico operacional publica apenas codigo permitido sem stderr ou credenciais', () => {
+            const original=cp.execFileSync;
+            try {
+              for (const [stderr,codigo] of [['An error occurred (AccessDeniedException): segredo-teste','AccessDeniedException'],['Error parsing parameter: segredo-teste','ENTRADA_CLI_INVALIDA'],['segredo-teste','COMANDO_NAO_CONFIRMADO']]) {
+                cp.execFileSync=()=>{const erro=Error('segredo-teste');erro.stderr=stderr;throw erro;};
+                assert.throws(()=>h.executar('aws',[], 'segredo-teste'),erro=>erro.codigoOperacional===codigo && !JSON.stringify(erro).includes('segredo-teste') && !String(erro).includes('segredo-teste') && erro.cause===undefined);
+              }
+            } finally { cp.execFileSync=original; }
+          });
 
           test('credencial aleatoria exclusiva preserva o contrato e rejeita master/injecao', () => {
             const a = h.gerarCredencial(), b = h.gerarCredencial();
