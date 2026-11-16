@@ -492,6 +492,12 @@ jobs:
             if (!etapas.some(v => v.includes('AWSCURRENT'))) throw Error('Secret sem versão atual; não gerar outra senha.');
             return true;
           }
+          BOOTSTRAP_ORCAMENTO_PAGAMENTO
+
+      - name: "🛡️ Preparar execução e diagnóstico do bootstrap"
+        if: env.TERRAFORM_ACTION == 'apply'
+        run: |
+          cat >> "$RUNNER_TEMP/bootstrap-rds-orcamento.cjs" <<'EXECUTAR_BOOTSTRAP_ORCAMENTO'
           let etapa = 'validação inicial';
           async function main() {
             if (process.env.TERRAFORM_ACTION !== 'apply' || process.env.GITHUB_REF !== 'refs/heads/develop') throw Error('Bootstrap permitido somente no apply oficial de develop.');
@@ -580,7 +586,7 @@ jobs:
           }
           if (require.main === module) Promise.resolve().then(iniciar).catch(erro => { console.error('Bootstrap de Orçamento/Pagamento não confirmado na etapa: '+etapa+'. Código: '+(erro.codigoOperacional || 'VALIDACAO_LOCAL')+'. Status não liberado; credenciais e diagnóstico sensível não publicados.'); process.exitCode=1; });
 
-          BOOTSTRAP_ORCAMENTO_PAGAMENTO
+          EXECUTAR_BOOTSTRAP_ORCAMENTO
 
       - name: "🚦 Invalidar disponibilidade anterior antes do apply"
         if: env.TERRAFORM_ACTION == 'apply'
