@@ -83,7 +83,7 @@ Para gerar plano, configure credenciais AWS e a variável não secreta `TF_VAR_d
 infra-vpc -> infra-kubernetes -> infra-rds -> aplicações -> infra-api-gateway
 ```
 
-Na implantação distribuída, usar `ORCAMENTO_PAGAMENTO_DB_ENABLED=true`: o bootstrap cria banco/login exclusivos pelo Job temporário da esteira e só publica prontidão após prova SQL e limpeza. O RDS compartilhado fisicamente não autoriza acesso cruzado aos bancos. Seguir a [sequência completa](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws); nenhum apply/destroy real deve ser executado localmente.
+Na implantação distribuída, usar `ORCAMENTO_PAGAMENTO_DB_ENABLED=true`: a preparação SQL cria banco/login exclusivos pelo Job temporário da esteira e só publica prontidão após prova SQL e limpeza. O RDS compartilhado fisicamente não autoriza acesso cruzado aos bancos. Seguir a [sequência completa](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws); nenhum apply/destroy real deve ser executado localmente.
 
 Depois do `apply`, a esteira valida o RDS, o secret gerenciado e os contratos SSM. Depois do `destroy`, valida a ausência do banco e dos parâmetros publicados.
 
@@ -113,7 +113,7 @@ O retorno de terraform-action.env para apply é reconhecido como mudança de inf
 
 As chaves de cache incluem o ID da conta retornado pela autenticação AWS, antes do ambiente e da execução. A restauração só pesquisa esse escopo, sem fallback para chaves históricas sem conta. Os caches anteriores permanecem preservados como histórico do laboratório encerrado 058264466885, inclusive quando contêm referências que a conta atual não consegue consultar. AccessDenied não é convertido em ausência.
 
-Sem cache no escopo atual, a esteira bloqueia apply. Um destroy dedicado só pode iniciar state novo depois de consultas read-only confirmarem que não existem recursos ou contratos do projeto na conta atual. Recursos internos do laboratório são preservados. Depois disso, o plano exclusivo de destroy e a validação de state vazio produzem o cache usado pelas próximas execuções da mesma conta. Em laboratório com recursos existentes e cache ausente, é necessário recuperar o state correto; o bootstrap não libera provisionamento automático.
+Sem cache no escopo atual, a esteira bloqueia apply. Um destroy dedicado só pode iniciar state novo depois de consultas read-only confirmarem que não existem recursos ou contratos do projeto na conta atual. Recursos internos do laboratório são preservados. Depois disso, o plano exclusivo de destroy e a validação de state vazio produzem o cache usado pelas próximas execuções da mesma conta. Em laboratório com recursos existentes e cache ausente, é necessário recuperar o state correto; a recuperação inicial não libera provisionamento automático.
 
 ## Preparação da subida e plano único — F4-04
 
@@ -141,7 +141,7 @@ A ADR-0025 mantém a instância RDS compartilhada e separa o banco lógico e a c
 
 Com a opção habilitada no futuro apply, o Terraform cria somente o contêiner de secret no Secrets Manager e os contratos não secretos. Não recebe a senha por variável, não cria secret version e não grava o material sensível no state. A esteira gera a credencial uma única vez e a persiste no Secrets Manager antes do SQL; repetições reutilizam a versão atual, sem trocar a senha do login. A primeira versão usa um token idempotente por secret: uma resposta perdida não autoriza substituir o valor por outra senha. Inventário de versões inválido ou sem AWSCURRENT bloqueia o processo.
 
-O banco `OficinaMecanicaOrcamentoPagamento` e o login `oficina_orcamento_pagamento` são criados por um Job temporário no EKS existente, pela própria esteira RDS. O login recebe db_owner exclusivamente no banco próprio, para permitir as migrations do serviço; não recebe papéis ou permissões de servidor. Schema e migrations continuam pertencendo ao serviço. O bootstrap autentica o login com a credencial persistida e valida seus privilégios antes de conceder acesso ao banco.
+O banco `OficinaMecanicaOrcamentoPagamento` e o login `oficina_orcamento_pagamento` são criados por um Job temporário no EKS existente, pela própria esteira RDS. O login recebe db_owner exclusivamente no banco próprio, para permitir as migrations do serviço; não recebe papéis ou permissões de servidor. Schema e migrations continuam pertencendo ao serviço. A preparação SQL autentica o login com a credencial persistida e valida seus privilégios antes de conceder acesso ao banco.
 
 O Job usa a imagem SQL Server 2022 já adotada no Compose da API, executando somente sqlcmd. Roda sem privilégio, sem token de service account e com filesystem somente leitura, usando /tmp temporário. As credenciais master e da aplicação seguem por Secret temporário, sem aparecer no comando ou no manifesto do Pod; não são credenciais de workload da aplicação. O bootstrap não copia credenciais AWS para o Pod. Job e Secret são removidos antes de publicar disponibilidade. Falha de execução ou limpeza mantém o contrato pendente; logs não recebem o diagnóstico SQL sensível. Uma etapa always tenta confirmar a limpeza após falha ou cancelamento, sem garantir remoção durante indisponibilidade do cluster.
 
