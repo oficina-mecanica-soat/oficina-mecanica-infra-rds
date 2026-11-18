@@ -1,34 +1,18 @@
 # 🗄️ Oficina Mecânica Infra RDS
 
-Este repositório provisiona e opera o Amazon RDS SQL Server de `development` da Oficina Mecânica, incluindo bancos lógicos e logins exclusivos de OS e Orçamento/Pagamento.
+Instância privada SQL Server Express com bancos lógicos e credenciais próprias para OS e Orçamento/Pagamento. Compartilhar a instância não autoriza compartilhar schemas, logins ou consultas.
 
-## 🎯 Responsabilidades
+## Dados e credenciais
 
-- Consumir VPC e subnets privadas publicados pela esteira VPC, e o security group do EKS publicado pela esteira Kubernetes.
-- Criar RDS SQL Server Express, DB subnet group e security group privado.
-- Publicar endpoint, security group e status no AWS Systems Manager Parameter Store.
-- Controlar `apply` e `destroy` com plano e validação real na AWS.
+- OS: banco `OficinaMecanicaDb`, login `oficina_os`.
+- Orçamento/Pagamento: banco `OficinaMecanicaOrcamentoPagamento`, login `oficina_orcamento_pagamento`.
+- `ORCAMENTO_PAGAMENTO_DB_ENABLED=true` habilita o preparo do banco de Orçamento/Pagamento.
+- RDS gerencia a credencial administrativa no Secrets Manager. A esteira persiste/reutiliza credenciais exclusivas e prepara os bancos por Job temporário no EKS; por isso Kubernetes precede RDS.
+- O login de cada aplicação possui permissões somente no banco próprio. Migrations pertencem aos serviços. Job e Secret temporários são removidos antes de publicar prontidão.
+- Contratos: `rds/os/{database_name,secret_arn}`, `rds/orcamento-pagamento/{database_name,secret_arn}` e status `rds-os`/`rds-orcamento-pagamento`, sob `/oficina-mecanica/development/`.
 
-## 🔀 Fluxo Git
+O status da instância não substitui a prova de acesso SQL de cada aplicação. Falha de preparação ou limpeza mantém o banco pendente. O CD de destroy bloqueia consumidores remanescentes; remoção da instância implica perda dos dados, conforme as simplificações acadêmicas registradas na ADR-0006.
 
-```text
-branch de trabalho -> PR develop -> deploy development -> PR release -> deploy homologation -> PR main -> deploy production
-```
-
-As branches protegidas são `develop`, `release`, `release/*` e `main`. A governança segue as esteiras VPC e Kubernetes:
-
-- **🔒 Proteção Git Flow:** PR, conversas resolvidas, bloqueio de push direto/force push/deleção, sem bypass; exige os checks `🔀 01 · Validar fluxo de branches` e `🚦 03 · Quality gate`.
-- **👥 Aprovação de PR:** uma aprovação, descarte de aprovação antiga e aprovação diferente do último autor do push.
-
-## 🔁 Workflows
-
-| Workflow | Responsabilidade |
-| --- | --- |
-| `🧪 CI` | Valida PRs para `develop`, `release`/`release/**` e `main`; verifica Git Flow, Terraform e quality gate. |
-| `🚀 CD Development` | Detecta mudanças de Terraform, chama o deploy AWS e pode abrir PR para release. |
-| `☁️ AWS Deploy` | Resolve `apply`/`destroy`, planeja, aplica e verifica AWS/SSM. |
-| `🔀 CD Release` | Registra o deploy lógico em homologation e pode abrir PR para main. |
-| `🏁 CD Production` | Registra o deploy lógico em production. |
 
 ## 🌐 Contrato entre esteiras
 
@@ -59,16 +43,6 @@ No Environment `development`, configurar os secrets `AWS_ACCESS_KEY_ID`, `AWS_SE
 
 Crie esses itens em **Settings > Environments > development**. Os três itens `AWS_*` são Environment Secrets com as credenciais temporárias do AWS Academy. `AWS_REGION`, `DB_USERNAME`, `AUTO_PR_ENABLED` e `RELEASE_BRANCH` são Variables; não inclua senha de banco no GitHub.
 
-## 🧭 Controle apply/destroy
-
-O arquivo `infra/terraform/environments/dev/terraform-action.env` controla a ação:
-
-```env
-TERRAFORM_ACTION=apply
-```
-
-Para destruir, altere-o explicitamente para `destroy` em um PR dedicado. O workflow recusa destroy se esse arquivo não mudou no mesmo push.
-
 ## 🧪 Validação local
 
 ```powershell
@@ -87,83 +61,14 @@ Na implantação distribuída, usar `ORCAMENTO_PAGAMENTO_DB_ENABLED=true`: a pre
 
 Depois do `apply`, a esteira valida o RDS, o secret gerenciado e os contratos SSM. Depois do `destroy`, valida a ausência do banco e dos parâmetros publicados.
 
-## 🛡️ Consumidores antes do destroy — AUD-002
+## Operação e documentação
 
-Antes do plano destrutivo e imediatamente antes de aplicar o mesmo plano salvo, o workflow exige ausência de consumidores API/Lambda, conforme RFC-0005. Consulta a identidade autenticada, os nomes de funções Lambda e os clusters da conta/região. Bloqueia se houver função com o prefixo aprovado `oficina-mecanica`; em cada cluster consulta Deployments/Pods pelo label existente `app=oficina-mecanica-api`, em todos os namespaces. Também bloqueia Deployment escalado a zero, que poderia voltar a acessar o banco. O controle é conservador: Lambda do projeto presente ou cluster inacessível impedem o destroy, mesmo sem prova de uma conexão SQL aberta.
+- [Visão geral, arquitetura e ordem das esteiras](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws).
+- [Configuração, primeira aplicação e recuperação após Reset](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/develop/docs/deploy/deploy-aws.md).
+- [Collection consolidada e ambientes Local/Development](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/develop/docs/evidencias/postman.md).
 
-Listagens vazias confirmadas permitem a recuperação de laboratório encerrado; AccessDenied, erro de autenticação/rede, resposta inválida ou ausência não comprovada bloqueiam. Status SSM ausente não é usado como prova de remoção da API. Não altera IAM, credenciais, Terraform/state ou plano salvo, não apaga consumidores e não faz fallback para apply. A guarda só roda em destroy; apply mantém seu fluxo existente.
+Todo provisionamento, atualização e destroy na AWS ocorre pelas esteiras oficiais. O controle é `infra/terraform/environments/dev/terraform-action.env`; destroy exige alteração dedicada e verificação dos consumidores. `AWS_DEPLOY_ENABLED` autoriza a janela real, e `AUTO_PR_ENABLED` controla somente a abertura de promoções. Alterar uma Variable não dispara o CD.
 
-Código e testes novos ficam inline nos workflows; o arquivo temporário da guarda/kubeconfig fica no runner, sem pasta adicional versionada. Os testes extraem a implementação real e verificam ausência, consumidores presentes, conta divergente, erros de consulta e execução das duas barreiras. Consultas locais de preparação não substituem as revalidações feitas pelo runner no momento do destroy.
+Um ambiente disponível pode ser testado sem destroy. Sem estado compatível, alguns owners exigem primeiro uma recuperação por destroy dedicado com inventário vazio comprovado. Não apague recursos ou caches para contornar o bloqueio; consulte o guia antes de iniciar uma conta ou retomar um laboratório.
 
-## ⚠️ AWS Academy
-
-O apply do RDS com credencial master gerenciada depende de `secretsmanager:CreateSecret`, `secretsmanager:TagResource` e `kms:DescribeKey`. Essas permissões serão comprovadas somente no apply controlado; se o LabRole as bloquear, a esteira deve falhar sem fazer fallback para senha em Terraform.
-
-Documentação central e arquitetura completa: [README da Oficina Mecânica API](https://github.com/oficina-mecanica-soat/oficina-mecanica-api).
-
-### Reconciliação de destroy após reset do laboratório
-
-O destroy restaura o cache Terraform existente e usa uma configuração temporária sem data sources de contratos SSM. O state original não é editado nem descartado: o provider confirma os recursos ausentes durante o plano de destruição. Somente o plano salvo, sem criação ou atualização, pode ser aplicado. Ao terminar, a esteira verifica que o state não contém recursos gerenciados antes de persistir o cache final. Falhas de autenticação, permissão ou rede bloqueiam a operação.
-
-Na API, vínculos Kubernetes só podem ser retirados por blocos declarativos removed com destroy=false após ResourceNotFoundException confirmar que o EKS registrado no state não existe. Com EKS existente, permanece a configuração normal de destroy. Não há uso de state rm, import ou mv.
-
-O retorno de terraform-action.env para apply é reconhecido como mudança de infraestrutura pelo detector de CD. O bloqueio AWS_DEPLOY_ENABLED descrito abaixo separa a preparação da execução; somente autorize nova subida em janela própria.
-
-#### State isolado por conta AWS
-
-As chaves de cache incluem o ID da conta retornado pela autenticação AWS, antes do ambiente e da execução. A restauração só pesquisa esse escopo, sem fallback para chaves históricas sem conta. Os caches anteriores permanecem preservados como histórico do laboratório encerrado 058264466885, inclusive quando contêm referências que a conta atual não consegue consultar. AccessDenied não é convertido em ausência.
-
-Sem cache no escopo atual, a esteira bloqueia apply. Um destroy dedicado só pode iniciar state novo depois de consultas read-only confirmarem que não existem recursos ou contratos do projeto na conta atual. Recursos internos do laboratório são preservados. Depois disso, o plano exclusivo de destroy e a validação de state vazio produzem o cache usado pelas próximas execuções da mesma conta. Em laboratório com recursos existentes e cache ausente, é necessário recuperar o state correto; a recuperação inicial não libera provisionamento automático.
-
-## Preparação da subida e plano único — F4-04
-
-O retorno a `TERRAFORM_ACTION=apply` prepara o RDS após VPC e Kubernetes disponíveis. A variável de repositório `AWS_DEPLOY_ENABLED` foi cadastrada como `false`; CD Development e workflow reutilizável exigem valor `true`, e o reutilizável também exige branch develop. Ausente/false/inválido bloqueia AWS. Não configurar override divergente no Environment. Aprovação/merge do PR não autoriza a janela de execução.
-
-A preparação corrige a divergência de planos registrada no plano de Gabriel como PIPE-002: o job `plan` grava `tfplan` para apply e destroy, confere o plano exclusivo de destroy quando aplicável e publica artefato com ID da execução/tentativa. O job `apply_or_destroy` restaura e valida o state da conta, prepara o ambiente, baixa **o mesmo artefato** e aplica `tfplan`; não gera outro plano. A validação exclusiva de destroy também permanece antes da execução. Retenção de um dia e falha caso o plano não exista seguem as referências VPC/Kubernetes; o identificador da tentativa evita confusão em reexecuções.
-
-Não altera state/cache, regras de recuperação, promoção, environment, contratos SSM ou as verificações reais de RDS/rede. A ordem restore → validação → preparação de destroy → init é mantida nos dois jobs. Os testes novos são inline no CI existente e verificam esse fluxo, os nomes correspondentes de artefato, ausência de replanejamento no job de aplicação e bloqueio real da etapa de resolução em fixture temporária. Nenhuma pasta/arquivo de scripts foi acrescentado.
-
-A futura execução autorizada provisionará a configuração já declarada: RDS SQL Server Express `16.00.4185.3.v1`, `db.t3.micro`, 20 GB criptografados, sem acesso público; DB subnet group nas subnets privadas e security group com entrada TCP/1433 do SG do EKS; senha master gerenciada pelo RDS no Secrets Manager e contratos SSM existentes. Não muda engine, classe, storage ou política de dados, não cria banco lógico de Orçamento/Pagamento, não executa migrations e não implanta aplicações. A separação de credenciais/bancos da F4-07 continua na frente responsável, sem anunciar isolamento já implementado.
-
-Em 11/11/2026, consulta read-only confirmou que a combinação declarada de engine/versão/classe possui opções disponíveis em us-east-1 e que DB_USERNAME está configurado. Isso não comprova permissão de criação, conectividade SQL ou autenticação de consumidores. Terraform fmt/validate, quatro testes de recuperação, teste inline do fluxo e actionlint (sem shellcheck/pyflakes locais) passaram; o CI do PR é a evidência antes do merge. Nenhum plano autenticado, apply/destroy ou banco foi criado nesta preparação. Gabriel realiza o merge e autoriza separadamente a implantação; o bloqueio deve ser restaurado ao final da janela.
-
-## Promoção cumulativa — AUD-003
-
-A abertura/manutenção automática do PR `develop` → `release` compara todo o conteúdo implantável pendente, seguindo a regra já aprovada na API/Execução. Uma alteração documental não libera código/infraestrutura anterior sem operação confirmada. Detector e guarda compartilham os mesmos caminhos, preservando o escopo de deploy existente.
-
-A guarda exige sucesso da operação atual ou do CD do último commit implantável na linha principal de develop, incluindo o job de apply/destroy da tentativa atual. Deploy pulado/falho, rerun falho, histórico ausente ou erro de Git/GitHub bloqueiam; documentação após operação comprovada continua permitida. É conservadora quando a evidência exigida não está disponível. Não consulta AWS.
-
-Preserva `AWS_DEPLOY_ENABLED`, `AUTO_PR_ENABLED`, environments, plano salvo, state/cache, guardrails de destroy e merge humano. Não altera ancestralidade (PIPE-005), recursos, contratos SSM ou `terraform-action.env`. PRs existentes continuam sujeitos à revisão humana; a trava protege sua abertura/manutenção pelo CD. Nesta rodada, integrar somente em `develop`, sem promover release/main, sem implantação e com laboratório offline. Testes ficam inline no CI existente, sem novos arquivos ou pastas auxiliares.
-
-## Bancos e credenciais exclusivos por serviço
-
-A ADR-0025 mantém a instância RDS compartilhada e separa o banco lógico e a credencial da aplicação. `ORCAMENTO_PAGAMENTO_DB_ENABLED` no Environment controla o preparo; ausente equivale a `false`. Essa flag não substitui `AWS_DEPLOY_ENABLED`, a ação explícita do Terraform ou a janela autorizada.
-
-No apply, a preparação de OS é obrigatória; Orçamento/Pagamento acompanha a opção acima. Para cada serviço, o Terraform cria somente o contêiner de secret no Secrets Manager e os contratos não secretos. Não recebe a senha por variável, não cria secret version e não grava o material sensível no state. A esteira gera a credencial uma única vez e a persiste no Secrets Manager antes do SQL; repetições reutilizam a versão atual, sem trocar a senha do login. A primeira versão usa um token idempotente por secret: uma resposta perdida não autoriza substituir o valor por outra senha. Inventário de versões inválido ou sem AWSCURRENT bloqueia o processo.
-
-O banco `OficinaMecanicaOrcamentoPagamento` e o login `oficina_orcamento_pagamento` são criados por um Job temporário no EKS existente, pela própria esteira RDS. O login recebe db_owner exclusivamente no banco próprio, para permitir as migrations do serviço; não recebe papéis ou permissões de servidor. Schema e migrations continuam pertencendo ao serviço. A preparação SQL autentica o login com a credencial persistida e valida seus privilégios antes de conceder acesso ao banco.
-
-O Job usa a imagem SQL Server 2022 já adotada no Compose da API, executando somente sqlcmd. Roda sem privilégio, sem token de service account e com filesystem somente leitura, usando /tmp temporário. As credenciais master e da aplicação seguem por Secret temporário, sem aparecer no comando ou no manifesto do Pod; não são credenciais de workload da aplicação. A preparação não copia credenciais AWS para o Pod. Job e Secret são removidos antes de publicar disponibilidade. Falha de execução ou limpeza mantém o contrato pendente; logs não recebem o diagnóstico SQL sensível. Uma etapa always tenta confirmar a limpeza após falha ou cancelamento, sem garantir remoção durante indisponibilidade do cluster.
-
-| Contrato SSM | Conteúdo |
-| --- | --- |
-| `/oficina-mecanica/development/rds/os/database_name` | `OficinaMecanicaDb` |
-| `/oficina-mecanica/development/rds/os/secret_arn` | ARN da credencial `oficina_os` |
-| `/oficina-mecanica/development/status/rds-os` | `ready` somente após prova SQL e limpeza |
-| `/oficina-mecanica/development/rds/orcamento-pagamento/database_name` | Nome do banco próprio |
-| `/oficina-mecanica/development/rds/orcamento-pagamento/secret_arn` | ARN não secreto da credencial própria |
-| `/oficina-mecanica/development/status/rds-orcamento-pagamento` | `bootstrap-pendente` até confirmar SQL e limpeza; então `ready` |
-
-O consumidor usa também o endpoint físico já publicado em `/oficina-mecanica/development/rds/endpoint`. O status geral do RDS confirma a instância, e o status de mensageria confirma filas; nenhum dos dois substitui a disponibilidade do banco isolado. Antes do apply, a esteira invalida a disponibilidade anterior comprovadamente pertencente ao state. Erro de acesso não equivale a ausência. O Terraform inicializa o status como pendente; a esteira é dona da transição operacional e o lifecycle preserva esse valor entre execuções.
-
-Orçamento/Pagamento não adota banco preexistente sem marcador de ownership. Para preservar o banco de OS já criado pela API, sua identificação exige o histórico de migrations, a tabela `GestaoOrdemServico.OrdensServico`, ausência de marcador de outro serviço e propriedade do administrador autenticado ou da conta gerenciada `rdsa` do RDS. Somente depois dessas verificações é registrado o marcador da API, sem recriar o banco ou seus dados. Usuário com SID divergente, senha incompatível ou privilégio de servidor bloqueia a preparação, sem DROP, mudança automática de senha ou concessão ao login não autenticado. A prova SQL verifica autenticação própria, criação/leitura/escrita com rollback e ausência de acesso ao banco de OS quando existente. Administradores da instância continuam fora dessa barreira; a prova local não substitui o aceite no RDS/AWS Academy.
-
-A credencial tem proteção contra remoção por um apply comum, inclusive se a flag desaparecer. O destroy dedicado usa a configuração de recuperação já existente e bloqueia API, Orçamento/Pagamento, Lambda e Pods de bootstrap remanescentes. Depois da destruição, confirma também a ausência dos contratos e do secret próprios. Não há remoção isolada automática de banco ou login.
-
-O CI extrai a mesma preparação SQL do workflow, testa os guardrails e o executa contra SQL Server local com um login sem sysadmin e permissões reduzidas de criação. Também executa o comando do Job em container com as mesmas restrições e planos Terraform com provider simulado. Essas provas não atestam IAM, RBAC, rede ou operação do laboratório.
-
-Referências: [privilégios da conta master do RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.MasterAccounts.html), [criação de usuário SQL Server no RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.SQLServer.CommonDBATasks.CreateUser.html) e [variáveis de ambiente do sqlcmd](https://learn.microsoft.com/en-us/sql/tools/sqlcmd/sqlcmd-use-scripting-variables?view=sql-server-ver16).
-
-A API utiliza o login `oficina_os` e Orçamento/Pagamento utiliza `oficina_orcamento_pagamento`. Cada login recebe acesso apenas ao próprio banco, sem privilégios de servidor; as provas SQL verificam também o bloqueio de acesso ao banco do outro serviço. A credencial administrativa fica restrita à preparação SQL pela esteira RDS. O compartilhamento físico da instância não implica compartilhamento de credenciais ou tabelas.
-
-O RDS SQL Server atribui a propriedade dos bancos à conta gerenciada `rdsa`, conforme a [documentação oficial da AWS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.SQLServer.CommonDBATasks.ChangeDBowner.html). A preparação reconhece essa identidade somente após validar instância, secret administrativo, banco, migrations e tabela esperados; não muda o proprietário nem aceita uma identidade arbitrária.
+Fluxo Git: branch de trabalho → PR para `develop` → `release` → `main`. O CD físico ocorre em development; release e production registram promoções lógicas. PRs e merges permanecem sujeitos aos checks e à revisão. Mudanças somente em README/docs não exigem deploy físico pelos detectores atuais.
