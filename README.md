@@ -2,7 +2,9 @@
 
 Instância privada SQL Server Express com bancos lógicos e credenciais próprias para OS e Orçamento/Pagamento. Compartilhar a instância não autoriza compartilhar schemas, logins ou consultas.
 
-## Dados e credenciais
+<a id="dados-e-credenciais"></a>
+
+## 🗄️ Dados e credenciais
 
 - OS: banco `OficinaMecanicaDb`, login `oficina_os`.
 - Orçamento/Pagamento: banco `OficinaMecanicaOrcamentoPagamento`, login `oficina_orcamento_pagamento`.
@@ -61,7 +63,9 @@ Na implantação distribuída, usar `ORCAMENTO_PAGAMENTO_DB_ENABLED=true`: a pre
 
 Depois do `apply`, a esteira valida o RDS, o secret gerenciado e os contratos SSM. Depois do `destroy`, valida a ausência do banco e dos parâmetros publicados.
 
-## Operação e documentação
+<a id="operação-e-documentação"></a>
+
+## 🧭 Operação e documentação
 
 - [Visão geral, arquitetura e ordem das esteiras](https://github.com/oficina-mecanica-soat/oficina-mecanica-api#deploy-aws).
 - [Configuração, primeira aplicação e recuperação após Reset](https://github.com/oficina-mecanica-soat/oficina-mecanica-api/blob/develop/docs/deploy/deploy-aws.md).
