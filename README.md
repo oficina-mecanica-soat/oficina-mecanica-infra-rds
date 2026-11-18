@@ -2,6 +2,23 @@
 
 Instância privada SQL Server Express com bancos lógicos e credenciais próprias para OS e Orçamento/Pagamento. Compartilhar a instância não autoriza compartilhar schemas, logins ou consultas.
 
+## 🏗️ Recursos provisionados por esta esteira
+
+| Escopo | Recursos | Como são preparados |
+| --- | --- | --- |
+| Compartilhado por OS e Orçamento/Pagamento | Uma instância RDS SQL Server Express privada e com armazenamento cifrado; DB subnet group; security group e regra TCP/1433 a partir do security group do EKS | Terraform, consumindo VPC/subnets e os contratos de Kubernetes |
+| Administração da instância | Credencial master gerenciada pelo RDS no Secrets Manager | RDS gerencia a senha; uso administrativo restrito à preparação dos bancos pela esteira |
+| OS / API | Banco lógico `OficinaMecanicaDb`, login `oficina_os` e secret exclusivo `oficina-mecanica/development/rds/os` | Preparação obrigatória por Job temporário no EKS após criar a instância e os metadados do secret |
+| Orçamento/Pagamento | Banco lógico `OficinaMecanicaOrcamentoPagamento`, login `oficina_orcamento_pagamento` e secret exclusivo `oficina-mecanica/development/rds/orcamento-pagamento` | Preparação por Job temporário quando `ORCAMENTO_PAGAMENTO_DB_ENABLED=true` |
+| Execução | Nenhum banco SQL, login SQL ou tabela DynamoDB nesta esteira | O [repositório de Execução](https://github.com/oficina-mecanica-soat/oficina-mecanica-execucao) provisiona a própria tabela DynamoDB |
+| Contratos | Endpoint/SG/ARN administrativo da instância; nome de banco, ARN do secret e prontidão por aplicação no SSM | Terraform publica metadados; o CD confirma prontidão após validar SQL e remover recursos temporários |
+
+**A console do RDS mostra uma instância compartilhada, não uma instância por microsserviço.** Dentro dela existem dois bancos lógicos e dois logins de aplicação independentes. As credenciais são distintas; as aplicações não usam o login master nem consultam o banco do outro serviço. O compartilhamento físico mantém um domínio comum de disponibilidade, conforme a ADR-0025.
+
+Terraform cria a infraestrutura e os contêineres de secrets. O workflow gera/persiste ou reutiliza a credencial de cada aplicação, cria/valida banco e login com permissões no banco próprio e limpa Job/Secret temporários. **Tabelas, schemas e migrations de negócio continuam nas aplicações**: a API aplica suas migrations em OS, e Orçamento/Pagamento aplica as suas no banco correspondente. Auth, no modo distribuído, consulta a API privada e não recebe banco próprio.
+
+Fontes: [instância e rede](infra/terraform/environments/dev/rds.tf), [contratos de OS](infra/terraform/environments/dev/banco-os.tf), [contratos de Orçamento/Pagamento](infra/terraform/environments/dev/orcamento-pagamento.tf) e [preparação SQL no CD](.github/workflows/aws-deploy.yml).
+
 <a id="dados-e-credenciais"></a>
 
 ## 🗄️ Dados e credenciais
