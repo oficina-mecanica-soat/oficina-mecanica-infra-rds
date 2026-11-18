@@ -135,9 +135,146 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
+      - name: "🧪 Validar promoção cumulativa sem AWS"
+        run: |
+          node <<'TESTAR_PROMOCAO_CUMULATIVA'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const os = require('node:os');
+          const cp = require('node:child_process');
+          const assert = require('node:assert/strict');
+          const workflow = fs.readFileSync('.github/workflows/cd-development.yml', 'utf8');
+          const bloco = workflow.match(/node <<'VALIDAR_PROMOCAO_CUMULATIVA'\r?\n([\s\S]*?)          VALIDAR_PROMOCAO_CUMULATIVA/);
+          assert(bloco, 'Guarda cumulativa ausente.');
+          const codigo = bloco[1].split(/\r?\n/).map(l => l.slice(10)).join('\n');
+          const validar = new Function(codigo.split('// Execução no runner:')[0] + '; return validarPromocao;')();
+          const detector = workflow.match(/node <<'DETECTAR_DEPLOY'\r?\n([\s\S]*?)          DETECTAR_DEPLOY/)[1].split(/\r?\n/).map(l => l.slice(10)).join('\n');
+          const caminhos = JSON.parse(workflow.match(/DEPLOYABLE_PATHS: >-\r?\n((?:    [^\n]*\r?\n)+)/)[1]);
+          const diretorio = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'promocao-cumulativa-'));
+          try {
+            const git = args => cp.execFileSync('git', args, { cwd: diretorio, encoding: 'utf8' }).trim();
+            git(['init', '-b', 'develop']);
+            git(['config', 'user.email', 'teste@example.invalid']);
+            git(['config', 'user.name', 'Teste local']);
+            const gravar = (nome, conteudo) => {
+              fs.mkdirSync(path.dirname(path.join(diretorio, nome)), { recursive: true });
+              fs.writeFileSync(path.join(diretorio, nome), conteudo);
+              git(['add', nome]);
+              git(['commit', '-m', 'cenário local']);
+              return git(['rev-parse', 'HEAD']);
+            };
+            const base = gravar('README.md', 'base');
+            const docs = gravar('README.md', 'documentação');
+            const consultarNunca = () => { throw new Error('Consulta inesperada.'); };
+            const opcoes = { git, caminhos, base, head: docs, consultar: consultarNunca };
+            assert.equal(validar(opcoes), 'SEM_ALTERACAO_IMPLANTAVEL');
+
+            git(['switch', '-c', 'feature/teste']);
+            gravar('infra/terraform/exemplo.tf', 'código');
+            git(['switch', 'develop']);
+            git(['merge', '--no-ff', 'feature/teste', '-m', 'merge funcional']);
+            const implantavel = git(['rev-parse', 'HEAD']);
+            const head = gravar('README.md', 'documentação depois do código');
+            const detectar = (antes, atual) => {
+              const saida = path.join(diretorio, 'saida-runner.txt');
+              fs.writeFileSync(saida, '');
+              cp.execFileSync(process.execPath, ['-e', detector], {
+                cwd: diretorio,
+                env: { ...process.env, DEPLOYABLE_PATHS: JSON.stringify(caminhos), GITHUB_BEFORE: antes, GITHUB_SHA: atual, GITHUB_OUTPUT: saida }
+              });
+              return fs.readFileSync(saida, 'utf8').trim();
+            };
+            assert.equal(detectar(base, implantavel), 'deploy_required=true');
+            assert.equal(detectar(implantavel, head), 'deploy_required=false');
+            let chamadas = [];
+            const run = { id: 123, run_attempt: 2, head_sha: implantavel, head_branch: 'develop', event: 'push', status: 'completed', conclusion: 'success' };
+            const job = { name: '☁️ 02 · Deploy em development / ☁️ 03 · Aplicar ou destruir RDS', conclusion: 'success' };
+            const consultar = endpoint => {
+              chamadas.push(endpoint);
+              return endpoint.startsWith('actions/workflows/') ? [{ workflow_runs: [run] }] : [{ jobs: [job] }];
+            };
+            const comCodigo = { ...opcoes, head, consultar };
+            assert.throws(() => validar({ ...comCodigo, consultar: () => [{ workflow_runs: [] }] }), /sem CD/);
+            assert.equal(validar(comCodigo), 'OPERACAO_ANTERIOR_CONFIRMADA');
+            assert(chamadas[0].includes('head_sha=' + implantavel), 'Deve buscar o merge em develop, não o commit da feature/documentação.');
+            assert(chamadas[1].includes('/attempts/2/jobs'), 'Deve consultar a tentativa atual.');
+            for (const estado of ['skipped', 'failure', 'cancelled']) {
+              job.conclusion = estado;
+              assert.throws(() => validar(comCodigo), /sem aplicação/);
+            }
+            job.conclusion = 'success';
+            assert.throws(() => validar({ ...comCodigo, consultar: endpoint => endpoint.startsWith('actions/workflows/') ? [{ workflow_runs: [run] }] : [{}] }), /Jobs/);
+            assert.throws(() => validar({ ...comCodigo, consultar: endpoint => [{ workflow_runs: [{ ...run, head_sha: '0'.repeat(40) }] }] }), /sem CD/);
+            assert.throws(() => validar({ ...comCodigo, consultar: endpoint => [{ workflow_runs: [run, { ...run, id: 124, conclusion: 'failure' }] }] }), /sem CD/);
+            run.conclusion = 'failure';
+            assert.throws(() => validar(comCodigo), /sem CD/);
+            run.conclusion = 'success';
+            run.status = 'in_progress';
+            assert.throws(() => validar(comCodigo), /sem CD/);
+            run.status = 'completed';
+            assert.throws(() => validar({ ...comCodigo, consultar: consultarNunca }), /Consulta inesperada/);
+            assert.throws(() => validar({ ...comCodigo, consultar: () => ({}) }), /Histórico/);
+            assert.equal(validar({ ...comCodigo, consultar: consultarNunca, resultadoAtual: 'success', acaoAtual: 'apply' }), 'OPERACAO_ATUAL_CONFIRMADA');
+            assert.equal(validar({ ...comCodigo, consultar: consultarNunca, resultadoAtual: 'success', acaoAtual: 'destroy' }), 'OPERACAO_ATUAL_CONFIRMADA');
+            assert.throws(() => validar({ ...comCodigo, consultar: consultarNunca, resultadoAtual: 'skipped', acaoAtual: 'apply' }), /Consulta inesperada/);
+            gravar('infra/terraform/exemplo.tf', 'outro código ainda sem deploy');
+            const posterior = gravar('README.md', 'mais documentação');
+            assert.throws(() => validar({ ...comCodigo, head: posterior }), /sem CD/);
+            gravar('infra/terraform/exemplo.tf', 'código');
+            assert.equal(validar({ ...comCodigo, base: implantavel, head: git(['rev-parse', 'HEAD']), consultar: consultarNunca }), 'SEM_ALTERACAO_IMPLANTAVEL');
+            console.log('Promoção cumulativa: código sem deploy bloqueado; código implantado seguido de docs permitido; falhas, skips, reruns e novo código protegidos.');
+          } finally {
+            assert.equal(path.dirname(fs.realpathSync(diretorio)), fs.realpathSync(process.env.RUNNER_TEMP || os.tmpdir()));
+            fs.rmSync(diretorio, { recursive: true, force: true });
+          }
+          TESTAR_PROMOCAO_CUMULATIVA
+
       - name: "🧪 Validar recuperação segura de destroy"
         run: node --test .github/scripts/*.test.cjs
 
+      - name: "🧪 Testar bloqueio de consumidores do RDS"
+        run: |
+          node <<'TESTAR_CONSUMIDORES_RDS'
+          const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict');
+          const workflow=fs.readFileSync('.github/workflows/aws-deploy.yml','utf8');
+          const bloco=workflow.match(/          cat > "\$RUNNER_TEMP\/verificar-consumidores-rds.cjs" <<'CONSUMIDORES_RDS'\r?\n([\s\S]*?)          CONSUMIDORES_RDS/);
+          assert.ok(bloco,'Guarda operacional deve existir no workflow');
+          const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rds-consumidores-'));
+          try {
+            const file=path.join(dir,'guarda.cjs');fs.writeFileSync(file,bloco[1].split(/\r?\n/).map(l=>l.slice(10)).join('\n'));
+            const {verificar}=require(file),conta='123456789012';
+            const executar=({funcoes=[],clusters=[],items=[],erroAws=false,erroKube=false,identidade=conta}={})=>verificar((servico)=>{
+              if(erroAws)throw Error('AccessDenied');
+              return servico==='sts'?{Account:identidade}:servico==='lambda'?funcoes:clusters;
+            },()=>{if(erroKube)throw Error('Forbidden');return {items};},conta);
+            executar();executar({clusters:['oficina-mecanica-eks-dev']});executar({funcoes:['funcao-do-laboratorio']});
+            assert.throws(()=>executar({funcoes:['oficina-mecanica-auth-lambda-dev']}),/Lambda.*presente/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],items:[{kind:'Deployment',spec:{replicas:0}}]}),/API.*presente/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],items:[{kind:'Pod'}]}),/API.*presente/);
+            assert.throws(()=>executar({erroAws:true}),/AccessDenied/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],erroKube:true}),/Forbidden/);
+            assert.throws(()=>executar({identidade:'999999999999'}),/Conta.*divergente/);
+            for(const funcoes of [null,{},['']])assert.throws(()=>executar({funcoes}),/Lambda.*inválida/);
+            for(const clusters of [null,{},['../fora']])assert.throws(()=>executar({clusters}),/EKS.*inválida/);
+            assert.throws(()=>executar({clusters:['oficina-mecanica-eks-dev'],items:null}),/Kubernetes.*inválida/);
+            const plano=workflow.split('\n  plan:')[1]?.split('\n  apply_or_destroy:')[0];
+            const aplicar=workflow.split('\n  apply_or_destroy:')[1];
+            assert.ok(plano.indexOf('&validar_consumidores')>=0 && plano.indexOf('&validar_consumidores')<plano.indexOf('plan -destroy -input=false -out=tfplan'));
+            assert.ok(aplicar.indexOf('*validar_consumidores')>=0 && aplicar.indexOf('*validar_consumidores')<aplicar.indexOf('apply -input=false -auto-approve tfplan'));
+            assert.ok(/&validar_consumidores\r?\n[\s\S]*?if: env.TERRAFORM_ACTION == 'destroy'/.test(plano));
+            assert.ok(!bloco[1].includes('state rm'));
+            assert.ok(bloco[1].includes('app in (oficina-mecanica-api,oficina-mecanica-orcamento-pagamento,oficina-mecanica-rds-bootstrap)'));
+            assert.ok(workflow.includes('ORCAMENTO_PAGAMENTO_DB_ENABLED'));
+            assert.ok(workflow.includes('BOOTSTRAP_ORCAMENTO_PAGAMENTO'));
+            assert.ok(workflow.indexOf('run: node \"$RUNNER_TEMP/bootstrap-rds-orcamento.cjs\" invalidate') < workflow.indexOf('run: terraform -chdir=\"$TF_WORKING_DIRECTORY\" apply -input=false -auto-approve tfplan'));
+            assert.ok(workflow.includes("if: always() && env.TERRAFORM_ACTION == 'apply' && steps.bootstrap_sql.outcome"));
+            assert.ok(workflow.includes('if: env.TERRAFORM_ACTION == \'apply\'\n        run: |\n          umask 077'));
+            console.log('Consumidores, falhas de acesso, respostas inválidas e duas barreiras de destroy verificados.');
+          } finally {
+            const alvo=path.resolve(dir);assert.ok(alvo.startsWith(path.resolve(os.tmpdir())+path.sep+'rds-consumidores-'));
+            fs.rmSync(alvo,{recursive:true,force:true});
+          }
+          TESTAR_CONSUMIDORES_RDS
       - name: "🛡️ Validar bloqueio e aplicação do plano salvo"
         run: |
           node <<'VALIDAR_FLUXO_RDS'
@@ -201,6 +338,262 @@ jobs:
           console.log('Bloqueio, state restaurado e aplicação do mesmo plano salvo validados.');
           VALIDAR_FLUXO_RDS
 
+      - name: "🧪 Validar bootstrap isolado com SQL Server local"
+        run: |
+          node <<'PREPARAR_TESTES_BOOTSTRAP'
+          const fs = require('node:fs'), path = require('node:path');
+          const origem = fs.readFileSync('.github/workflows/aws-deploy.yml','utf8').replace(/\r\n/g,'\n');
+          const bloco = origem.match(/          cat > "\u0024RUNNER_TEMP\/bootstrap-rds-orcamento.cjs" <<'BOOTSTRAP_ORCAMENTO_PAGAMENTO'\n([\s\S]*?)          BOOTSTRAP_ORCAMENTO_PAGAMENTO/);
+          if(!bloco) throw Error('Bootstrap real ausente no CD.');
+          const execucao = origem.match(/          cat >> "\u0024RUNNER_TEMP\/bootstrap-rds-orcamento.cjs" <<'EXECUTAR_BOOTSTRAP_ORCAMENTO'\n([\s\S]*?)          EXECUTAR_BOOTSTRAP_ORCAMENTO/);
+          if(!execucao) throw Error('Execução real do bootstrap ausente no CD.');
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'bootstrap-rds-orcamento.cjs'),[bloco[1],execucao[1]].map(parte=>parte.split('\n').map(l=>l.slice(10)).join('\n')).join('\n'));
+          PREPARAR_TESTES_BOOTSTRAP
+          cat > "$RUNNER_TEMP/bootstrap-rds-orcamento.test.cjs" <<'TESTAR_BOOTSTRAP_SQL'
+          const { test } = require('node:test');
+          const assert = require('node:assert/strict');
+          const cp = require('node:child_process');
+          const crypto = require('node:crypto');
+          const h = require('./bootstrap-rds-orcamento.cjs');
+
+          function carregarPreparacao(owner) {
+            const arquivo=require.resolve('./bootstrap-rds-orcamento.cjs');
+            const cache=require.cache[arquivo],anterior=process.env.RDS_DATABASE_OWNER;
+            try { process.env.RDS_DATABASE_OWNER=owner;delete require.cache[arquivo];return require(arquivo); }
+            finally { require.cache[arquivo]=cache;if(anterior===undefined)delete process.env.RDS_DATABASE_OWNER;else process.env.RDS_DATABASE_OWNER=anterior; }
+          }
+
+          test('diagnóstico SQL permite somente fase conhecida e código numérico, sem copiar conteúdo sensível', () => {
+            assert.equal(h.codigoFalhaSql('senha=segredo\nSQL_FALHA_PREPARACAO_51000\ntexto SQL'), 'SQL_FALHA_PREPARACAO_51000');
+            for (const logs of ['senha=segredo','SQL_FALHA_LOGIN_senha','SQL_FALHA_OUTRA_123','SQL_FALHA_LOGIN_123 segredo'])
+              assert.equal(h.codigoFalhaSql(logs), 'SQL_SEM_DIAGNOSTICO_PERMITIDO');
+          });
+
+          test('OS recebe identidade propria e owners desconhecidos ou contratos alheios sao rejeitados', () => {
+            const os=carregarPreparacao('os');
+            assert.equal(os.database,'OficinaMecanicaDb');assert.equal(os.username,'oficina_os');
+            assert.notEqual(os.username,h.username);
+            assert.throws(()=>carregarPreparacao('outro'));
+            assert.throws(()=>os.validarCredencial(h.gerarCredencial()));
+            const m={habilitado:true,database_name:os.database,username:os.username,secret_arn:'arn:aws:secretsmanager:us-east-1:123456789012:secret:oficina-mecanica/development/rds/os-Ab123Z',status_parameter:'/oficina-mecanica/development/status/rds-os'};
+            os.validarMetadados(m,'123456789012','us-east-1');
+            assert.throws(()=>h.validarMetadados(m,'123456789012','us-east-1'));
+          });
+
+          test('credencial segue por arquivo temporario restrito e removido inclusive quando a CLI falha', () => {
+            const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+            const original=cp.execFileSync,anterior=process.env.RUNNER_TEMP,regiaoAnterior=process.env.AWS_REGION;
+            const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rds-credencial-teste-'));
+            process.env.RUNNER_TEMP=dir;
+            process.env.AWS_REGION='us-east-1';
+            try {
+              for (const falha of [false,true]) {
+                const credencial=h.gerarCredencial();let arquivo;
+                cp.execFileSync=(bin,args,options)=>{
+                  assert.equal(bin,'aws');assert.equal(options.input,undefined);
+                  assert(!args.some(a=>a.includes(credencial.password)));
+                  const referencia=args[args.indexOf('--cli-input-json')+1];
+                  assert(referencia.startsWith('file://'));arquivo=referencia.slice(7);
+                  assert.equal(path.dirname(path.dirname(arquivo)),dir);
+                  const entrada=JSON.parse(fs.readFileSync(arquivo,'utf8'));
+                  assert.deepEqual(JSON.parse(entrada.SecretString),credencial);
+                  if(process.platform!=='win32') {assert.equal(fs.statSync(arquivo).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(arquivo)).mode&0o777,0o700);}
+                  if(falha) throw Error('falha simulada');
+                  return JSON.stringify({ARN:'arn-proprio',VersionId:'versao'});
+                };
+                if(falha) assert.throws(()=>h.gravarVersao('arn-proprio',credencial));
+                else assert.equal(h.gravarVersao('arn-proprio',credencial).VersionId,'versao');
+                assert(!fs.existsSync(arquivo));assert.equal(fs.readdirSync(dir).length,0);
+              }
+            } finally {
+              cp.execFileSync=original;
+              if(anterior===undefined)delete process.env.RUNNER_TEMP;else process.env.RUNNER_TEMP=anterior;
+              if(regiaoAnterior===undefined)delete process.env.AWS_REGION;else process.env.AWS_REGION=regiaoAnterior;
+              fs.rmdirSync(dir);
+            }
+          });
+
+          test('diagnostico operacional publica apenas codigo permitido sem stderr ou credenciais', () => {
+            const original=cp.execFileSync;
+            try {
+              for (const [stderr,codigo] of [['An error occurred (AccessDeniedException): segredo-teste','AccessDeniedException'],['Error parsing parameter: segredo-teste','ENTRADA_CLI_INVALIDA'],['segredo-teste','COMANDO_NAO_CONFIRMADO']]) {
+                cp.execFileSync=()=>{const erro=Error('segredo-teste');erro.stderr=stderr;throw erro;};
+                assert.throws(()=>h.executar('aws',[], 'segredo-teste'),erro=>erro.codigoOperacional===codigo && !JSON.stringify(erro).includes('segredo-teste') && !String(erro).includes('segredo-teste') && erro.cause===undefined);
+              }
+            } finally { cp.execFileSync=original; }
+          });
+
+          test('credencial aleatoria exclusiva preserva o contrato e rejeita master/injecao', () => {
+            const a = h.gerarCredencial(), b = h.gerarCredencial();
+            h.validarCredencial(a);
+            assert.notEqual(a.password,b.password);
+            for (const mudar of [c => c.username='sa',c => c.database='OficinaMecanicaDb',c => c.password="senha'com-injecao",c => c.extra='nao permitido']) {
+              const c={...a};mudar(c);assert.throws(()=>h.validarCredencial(c));
+            }
+          });
+          test('credencial somente nasce sem versões; estágio pendente ou inventário inválido bloqueiam', () => {
+            const token=h.tokenVersaoInicial('arn-proprio');
+            assert(/^[a-f0-9]{64}$/.test(token));
+            assert.equal(token,h.tokenVersaoInicial('arn-proprio'));
+            assert.notEqual(token,h.tokenVersaoInicial('outro-arn'));
+            assert.equal(h.possuiVersaoAtual(undefined),false);
+            assert.equal(h.possuiVersaoAtual({}),false);
+            assert.equal(h.possuiVersaoAtual({versao:['AWSCURRENT']}),true);
+            for(const v of [null,[],{versao:['AWSPENDING']},{versao:'AWSCURRENT'},{versao:[null]}]) assert.throws(()=>h.possuiVersaoAtual(v));
+          });
+          test('metadados vinculam owner, conta, regiao e disponibilidade separada', () => {
+            const m={habilitado:true,database_name:h.database,username:h.username,secret_arn:'arn:aws:secretsmanager:us-east-1:123456789012:secret:oficina-mecanica/development/rds/orcamento-pagamento-Ab123Z',status_parameter:'/oficina-mecanica/development/status/rds-orcamento-pagamento'};
+            h.validarMetadados(m,'123456789012','us-east-1');
+            for (const [k,v] of [['habilitado',false],['database_name','OficinaMecanicaDb'],['username','sa'],['status_parameter','/oficina-mecanica/development/status/rds'],['secret_arn',m.secret_arn.replace('123456789012','999999999999')]]) assert.throws(()=>h.validarMetadados({...m,[k]:v},'123456789012','us-east-1'));
+          });
+          test('Job temporario usa referencias a secret, sem credencial em comando/Pod e sem token de service account', () => {
+            const c=h.gerarCredencial(),admin={username:'master_teste',password:'admin-ficticio-nao-produtivo'};
+            const [secret,job]=h.montarRecursos('rds-orcamento-123-1','rds.test.local',admin,c);
+            assert.equal(secret.kind,'Secret');assert.equal(job.kind,'Job');
+            const spec=job.spec.template.spec, container=spec.containers[0];
+            assert.equal(spec.automountServiceAccountToken,false);
+            assert.equal(container.securityContext.allowPrivilegeEscalation,false);
+            assert.equal(container.securityContext.readOnlyRootFilesystem,true);
+            assert(!JSON.stringify(job).includes(c.password));assert(!JSON.stringify(job).includes(admin.password));
+            assert(container.env.filter(e=>e.valueFrom).every(e=>e.valueFrom.secretKeyRef.name===secret.metadata.name));
+            assert(!container.command.join(' ').includes(' -P '));
+            assert.equal(job.spec.backoffLimit,0);
+            h.validarRemocaoRecurso(job,'rds-orcamento-123-1');
+            assert.throws(()=>h.validarRemocaoRecurso(job,'rds-orcamento-999-1'));
+            assert.throws(()=>h.validarRemocaoRecurso({...job,metadata:{...job.metadata,namespace:'outro'}},'rds-orcamento-123-1'));
+          });
+          test('limpeza confere ownership e remove Job antes do Secret, sem apagar recurso divergente', () => {
+            const id='rds-orcamento-123-1', apagados=[];
+            const recurso={metadata:{name:id,namespace:'default',labels:{app:'oficina-mecanica-rds-bootstrap','oficina-mecanica/bootstrap-run':id}}};
+            const kube=args=>{if(args[0]==='get')return JSON.stringify(recurso);apagados.push(args[1]);return '';};
+            h.limparRecursos(kube,id);
+            assert.deepEqual(apagados,['job','secret']);
+            const alterado={metadata:{...recurso.metadata,namespace:'outro'}};
+            const indevidos=[];
+            assert.throws(()=>h.limparRecursos(args=>{if(args[0]==='get')return JSON.stringify(alterado);indevidos.push(args);return '';},id));
+            assert.equal(indevidos.length,0);
+            assert.throws(()=>h.limparRecursos(()=>{throw Error('Forbidden');},id));
+          });
+          test('disponibilidade anterior exige ownership e fica pendente antes de alterar a instancia', () => {
+            const nome='/oficina-mecanica/development/status/rds-orcamento-pagamento', conta='123456789012', regiao='us-east-1';
+            const p={Name:nome,ARN:'arn:aws:ssm:'+regiao+':'+conta+':parameter'+nome,Type:'String',Value:'ready'};
+            const estado={resources:[{mode:'managed',type:'aws_ssm_parameter',name:'orcamento_pagamento_status',instances:[{attributes:{name:nome,arn:p.ARN}}]}]};
+            const plano=habilitado=>({variables:{orcamento_pagamento_db_enabled:{value:habilitado}}});
+            assert(h.precisaInvalidar(plano(true),{resources:[]}));
+            assert(h.precisaInvalidar(plano('true'),{resources:[]}));
+            assert.equal(h.precisaInvalidar(plano('false'),{resources:[]}),false);
+            for (const valor of [null,undefined,'', 'TRUE','false ',1,0,[],{}]) assert.throws(()=>h.precisaInvalidar(plano(valor),{resources:[]}));
+            assert(h.precisaInvalidar(plano(false),estado));
+            assert.equal(h.precisaInvalidar(plano(false),{resources:[]}),false);
+            assert.throws(()=>h.precisaInvalidar({},estado));
+            let escritas=0;
+            h.invalidarDisponibilidade(estado,conta,regiao,()=>p,()=>{escritas++;return {Version:2};});
+            assert.equal(escritas,1);
+            h.invalidarDisponibilidade(estado,conta,regiao,()=>null,()=>{throw Error('Não escrever após ausência.');});
+            assert.throws(()=>h.invalidarDisponibilidade({resources:[]},conta,regiao,()=>p,()=>({Version:2})));
+            assert.throws(()=>h.invalidarDisponibilidade(estado,'999999999999',regiao,()=>p,()=>({Version:2})));
+            assert.throws(()=>h.invalidarDisponibilidade(estado,conta,regiao,()=>({...p,Type:'SecureString'}),()=>({Version:2})));
+            assert.throws(()=>h.invalidarDisponibilidade(estado,conta,regiao,()=>p,()=>({})));
+          });
+          test('modo desabilitado nao consulta AWS, credenciais ou Kubernetes', async () => {
+            const original=cp.execFileSync, chamadas=[];
+            const anteriores={TERRAFORM_ACTION:process.env.TERRAFORM_ACTION,GITHUB_REF:process.env.GITHUB_REF,TF_WORKING_DIRECTORY:process.env.TF_WORKING_DIRECTORY};
+            try {
+              process.env.TERRAFORM_ACTION='apply';process.env.GITHUB_REF='refs/heads/develop';process.env.TF_WORKING_DIRECTORY='nao-utilizado';
+              cp.execFileSync=(bin,args)=>{chamadas.push([bin,...args]);assert.equal(bin,'terraform');return JSON.stringify({orcamento_pagamento_bootstrap:{value:{habilitado:false}}});};
+              await h.main();assert.equal(chamadas.length,1);
+              cp.execFileSync=(bin,args)=>{chamadas.push([bin,...args]);assert.equal(bin,'terraform');return JSON.stringify({variables:{orcamento_pagamento_db_enabled:{value:false}}});};
+              h.invalidarAntesDoApply();assert.equal(chamadas.length,2);
+            } finally {
+              cp.execFileSync=original;
+              for(const [k,v] of Object.entries(anteriores))if(v===undefined)delete process.env[k];else process.env[k]=v;
+            }
+          });
+          test('SQL real com permissoes reduzidas cria banco/login, preserva senha, isola OS e nao adota banco desconhecido', {timeout:240000}, async () => {
+            const nome='oficina-rds-bootstrap-teste-'+crypto.randomBytes(6).toString('hex');
+            const saPassword=crypto.randomBytes(32).toString('hex')+'!Aa9';
+            const runnerPassword=crypto.randomBytes(32).toString('hex')+'!Aa9';
+            const credencial=h.gerarCredencial();
+            const env={...process.env,MSSQL_SA_PASSWORD:saPassword};
+            let cid;
+            const executar=(args,options={})=>cp.execFileSync('docker',args,{encoding:'utf8',stdio:['pipe','pipe','pipe'],...options});
+            const sql=(texto,identidade='rds_master_teste',senha=runnerPassword,banco='master',appPassword=credencial.password)=>{
+              try {
+                return executar(['exec','-i','-e','SQLCMDUSER','-e','SQLCMDPASSWORD','-e','APP_PASSWORD',cid,'/opt/mssql-tools18/bin/sqlcmd','-S','localhost','-d',banco,'-C','-b','-l','5','-t','30'],
+                  {input:texto,env:{...process.env,SQLCMDUSER:identidade,SQLCMDPASSWORD:senha,APP_PASSWORD:appPassword}});
+              } catch(erro) {
+                const textoErro=String(erro.stderr||erro.stdout||'SQL não confirmado.').replaceAll(saPassword,'[teste]').replaceAll(runnerPassword,'[teste]').replaceAll(credencial.password,'[teste]');
+                throw Error(textoErro.slice(0,1200));
+              }
+            };
+            try {
+              cid=executar(['run','--detach','--name',nome,'--label','oficina.owner=rds-bootstrap-test','--env','ACCEPT_EULA=Y','--env','MSSQL_SA_PASSWORD',h.image],{env}).trim();
+              assert(/^[a-f0-9]{64}$/.test(cid));
+              const limite=Date.now()+150000;
+              while(true){
+                try{sql('SELECT 1;','sa',saPassword);break;}catch{if(Date.now()>limite)throw Error('SQL local não ficou disponível.');await new Promise(r=>setTimeout(r,1000));}
+              }
+              sql([
+                "CREATE LOGIN [rds_master_teste] WITH PASSWORD=N'"+runnerPassword+"', CHECK_POLICY=ON;",
+                'GRANT CREATE ANY DATABASE TO [rds_master_teste];',
+                'GRANT ALTER ANY LOGIN TO [rds_master_teste];',
+                'GRANT VIEW ANY DEFINITION TO [rds_master_teste];'
+              ].join('\n'),'sa',saPassword);
+              sql('CREATE DATABASE [OficinaMecanicaDb];');
+              const executarBootstrap=()=>{
+                sql(h.sqlBootstrap);
+                sql(h.sqlValidarLogin,h.username,credencial.password);
+                sql(h.sqlConfigurarBanco);
+                sql(h.sqlProva,h.username,credencial.password,h.database);
+              };
+              executarBootstrap();
+              executarBootstrap();
+              const scriptJob=h.montarRecursos('rds-orcamento-123-1','localhost',{username:'rds_master_teste',password:runnerPassword},credencial)[1].spec.template.spec.containers[0].command[2];
+              executar(['run','--rm','--label','oficina.owner=rds-bootstrap-test','--read-only','--tmpfs','/tmp:rw,mode=1777','--cap-drop','ALL','--security-opt','no-new-privileges','--user','10001','--network','container:'+cid,
+                ...['SQLCMDUSER','SQLCMDPASSWORD','APP_PASSWORD','DB_HOST','HOME'].flatMap(k=>['--env',k]),'--entrypoint','/bin/bash',h.image,'-c',scriptJob],
+                {env:{...process.env,SQLCMDUSER:'rds_master_teste',SQLCMDPASSWORD:runnerPassword,APP_PASSWORD:credencial.password,DB_HOST:'localhost',HOME:'/tmp'}});
+              assert.throws(()=>sql('SELECT TOP (0) * FROM [OficinaMecanicaDb].sys.tables;',h.username,credencial.password,h.database));
+              assert.throws(()=>sql('CREATE DATABASE [BancoNaoAutorizado];',h.username,credencial.password,h.database));
+              assert.throws(()=>sql("CREATE LOGIN [LoginNaoAutorizado] WITH PASSWORD=N'TesteLocal-Aa9!';",h.username,credencial.password,h.database));
+              assert.throws(()=>sql(h.sqlValidarLogin,h.username,h.gerarCredencial().password));
+              sql(h.sqlProva,h.username,credencial.password,h.database);
+              const prova=sql("SELECT CASE WHEN OBJECT_ID(N'dbo.__oficina_bootstrap_prova') IS NULL THEN 1 ELSE 0 END;",h.username,credencial.password,h.database);
+              assert(prova.includes('1'));
+              const os=carregarPreparacao('os'),credencialOs=os.gerarCredencial();
+              assert.throws(()=>sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password),/Msg 51022, Level 16/);
+              sql('USE [OficinaMecanicaDb]; CREATE TABLE dbo.__EFMigrationsHistory (Id int NOT NULL); EXEC(N\'CREATE SCHEMA [GestaoOrdemServico]\'); CREATE TABLE GestaoOrdemServico.OrdensServico (Id int NOT NULL); INSERT INTO GestaoOrdemServico.OrdensServico VALUES (42);');
+              // O RDS atribui o proprietário à conta gerenciada rdsa; o master mantém db_owner.
+              sql("CREATE LOGIN [rdsa] WITH PASSWORD=N'"+credencialOs.password+"'; CREATE LOGIN [owner_desconhecido] WITH PASSWORD=N'"+credencialOs.password+"'; ALTER AUTHORIZATION ON DATABASE::[OficinaMecanicaDb] TO [owner_desconhecido]; USE [OficinaMecanicaDb]; CREATE USER [rds_master_teste] FOR LOGIN [rds_master_teste]; ALTER ROLE [db_owner] ADD MEMBER [rds_master_teste];",'sa',saPassword);
+              assert.throws(()=>sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password),/Msg 51024, Level 16/);
+              sql("ALTER AUTHORIZATION ON DATABASE::[OficinaMecanicaDb] TO [rdsa];",'sa',saPassword);
+              const prepararOs=()=>{
+                sql(os.sqlBootstrap,'rds_master_teste',runnerPassword,'master',credencialOs.password);
+                sql(os.sqlValidarLogin,os.username,credencialOs.password);
+                sql(os.sqlConfigurarBanco);
+                sql(os.sqlProva,os.username,credencialOs.password,os.database);
+              };
+              prepararOs();prepararOs();
+              assert(sql('SELECT Id FROM GestaoOrdemServico.OrdensServico;',os.username,credencialOs.password,os.database).includes('42'));
+              assert.throws(()=>sql('SELECT TOP (0) * FROM [OficinaMecanicaOrcamentoPagamento].sys.tables;',os.username,credencialOs.password,os.database));
+              assert.throws(()=>sql('SELECT TOP (0) * FROM [OficinaMecanicaDb].sys.tables;',h.username,credencial.password,h.database));
+              assert.throws(()=>sql('CREATE DATABASE [BancoNaoAutorizadoOs];',os.username,credencialOs.password,os.database));
+              console.log('Dois bancos lógicos, dois logins, dados da OS preservados e acesso cruzado bloqueado nos dois sentidos.');
+              sql("USE [OficinaMecanicaOrcamentoPagamento]; EXEC sys.sp_dropextendedproperty @name=N'OficinaServico';");
+              assert.throws(()=>sql(h.sqlBootstrap),/owner/);
+              console.log('SQL local: repetição, isolamento e bloqueios confirmados com login sem sysadmin.');
+            } finally {
+              if(cid){
+                assert(/^[a-f0-9]{64}$/.test(cid));
+                const owner=executar(['inspect','--format','{{index .Config.Labels "oficina.owner"}}',cid]).trim();
+                assert.equal(owner,'rds-bootstrap-test');
+                executar(['rm','--force',cid]);
+              }
+            }
+          });
+
+          TESTAR_BOOTSTRAP_SQL
+          node --test "$RUNNER_TEMP/bootstrap-rds-orcamento.test.cjs"
+
       - name: "🎨 03 · Verificar formatação Terraform"
         run: |
           terraform fmt -check -recursive infra/terraform
@@ -212,6 +605,9 @@ jobs:
       - name: "🔍 05 · Validar configuração Terraform"
         run: |
           terraform -chdir="$TF_WORKING_DIRECTORY" validate
+
+      - name: "🧪 06 · Validar contratos com providers simulados"
+        run: terraform -chdir="$TF_WORKING_DIRECTORY" test
 
   quality_gate:
     name: "🚦 03 · Quality gate"
